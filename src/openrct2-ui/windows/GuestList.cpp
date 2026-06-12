@@ -463,7 +463,17 @@ namespace OpenRCT2::Ui::Windows
             }
 
             {
-                Formatter ft(_filterArguments.args);
+                auto* filterArgs = _filterArguments.args;
+                if (format == STR_GUESTS_FILTER)
+                {
+                    auto rideFilterFormat = GetRideFilterString(_filterArguments.GetFirstStringId());
+                    if (rideFilterFormat != kStringIdNone)
+                    {
+                        format = rideFilterFormat;
+                        filterArgs += sizeof(StringId);
+                    }
+                }
+                Formatter ft(filterArgs);
                 drawTextEllipsised(rt, screenCoords, 310, format, ft);
             }
 
@@ -916,6 +926,27 @@ namespace OpenRCT2::Ui::Windows
                     return STR_GUESTS_FILTER_THINKING;
                 case GuestFilterType::GuestsThinkingAbout:
                     return STR_GUESTS_FILTER_THINKING_ABOUT;
+            }
+        }
+
+        // The guest action strings ("On {STRINGID}" etc.) begin with a capital letter, which is wrong when embedded
+        // mid-sentence in the filter description, so use a dedicated string for the ride related filters instead.
+        static constexpr StringId GetRideFilterString(StringId actionStringId)
+        {
+            switch (actionStringId)
+            {
+                case STR_ON_RIDE:
+                    return STR_GUESTS_FILTER_ON_RIDE;
+                case STR_IN_RIDE:
+                    return STR_GUESTS_FILTER_IN_RIDE;
+                case STR_AT_RIDE:
+                    return STR_GUESTS_FILTER_AT_RIDE;
+                case STR_QUEUING_FOR:
+                    return STR_GUESTS_FILTER_QUEUING_FOR_RIDE;
+                case STR_HEADING_FOR:
+                    return STR_GUESTS_FILTER_HEADING_FOR_RIDE;
+                default:
+                    return kStringIdNone;
             }
         }
 
