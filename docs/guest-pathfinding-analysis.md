@@ -319,3 +319,176 @@ version bump with import defaults; all new randomness must come from
 `ScenarioRand` and all caches must be pure functions of game state to keep
 multiplayer and replays in sync (`GameStateSnapshots.cpp` will catch
 violations).
+
+---
+
+## 6. Feasibility: dynamic A* from any path coordinate to a destination
+
+This section analyses whether full A* can be computed — and recomputed on
+demand — from an arbitrary path tile to a goal at runtime, without degrading
+the game: no mutation of the tile map structures, no save-format coupling,
+no frame stalls, no multiplayer desyncs.
+
+### 6.1 The graph already exists; the constant factor is the tile map
+
+A* needs nodes, neighbours and costs. The path network already defines them
+implicitly:
+
+- **Node** = `(x, y, baseZ)` of a `PathElement`. The z component is required:
+  paths stack (bridges, multi-storey layouts) and slopes shift z by ±2 per
+  tile (`FootpathIsZAndDirectionValid`).
+- **Neighbour expansion** = for each of ≤4 permitted edges
+  (`PathGetPermittedEdges`, which already folds in banners), probe the
+  adjacent tile via `MapGetFirstElementAt` (a `TilePointerIndex` lookup —
+  O(1) to the tile, then a linear scan of that tile's element list) and
+  validate z/slope/connection — exactly what `PeepPathfindHeuristicSearch`
+  does per step today.
+- **Cost** = 1 per tile (optionally +penalty for wide tiles, slopes, or
+  crowding).
+
+So no new persistent graph is required: A* can run directly against the live
+map, which means **the park map is never modified and never becomes a
+secondary source of truth**. The element-list scan per probe is the dominant
+constant factor (typically 1–10 elements per tile); a realistic budget is
+~100–300 ns per node expansion.
+
+### 6.2 Search bookkeeping must live outside the map
+
+The cardinal rule for "don't render the map useless": A* state
+(open/closed/g-scores/parents) must never be stored in `TileElement`s.
+There are no spare bits worth taking, multiple overlapping path elements per
+tile make per-element state ambiguous, and anything written into elements
+leaks into saves, replays and `GameStateSnapshots` comparisons.
+
+Instead use a **shared, transient scratch structure**, one per search (or
+per worker thread):
+
+- key: packed `(x:10 | y:10 | z:8)` → 28 bits, fits `uint32_t`;
+- storage: open-addressing hash map, or sparse paged arrays with a
+  **generation counter** so the scratch is "cleared" by bumping an integer
+  rather than memset-ing 1001×1001 cells;
+- open set: binary heap keyed `(f, h, packedCoord)` — the third component
+  gives **total deterministic ordering**, independent of hash iteration or
+  allocation order, which is mandatory for multiplayer.
+
+Memory: a worst-case full-network search over ~50k path tiles at ~16
+bytes/node is under 1 MB, shared across all guests. Nothing is serialised.
+
+### 6.3 The real constraint is search *frequency*, not search *cost*
+
+Single-search cost is acceptable: with an admissible Manhattan heuristic and
+unit costs, A* explores a corridor between start and goal; a typical
+medium-park route (~100–300 expansions) costs tens of microseconds, and a
+pathological full-network flood of ~50k expansions costs ~5–15 ms. The
+problem is multiplication. At 40 game ticks/second (`kGameUpdateFPS`),
+guests cross a tile every ~0.5–1 s of walking; a busy park with ~10,000
+walking guests makes **~10–20k per-tile decisions per second**. Running A*
+per decision — i.e. a drop-in replacement for `CalculateNextDestination`'s
+current search — is out of the question (~1–4 full cores in the best case,
+frame-length stalls in the worst).
+
+The conclusion is structural, and it is the key design change: **A* only
+works if its output is kept**. Compute a route once, then *follow* it:
+
+- store per guest a compact route: a start tile + a sequence of 2-bit
+  directions (`uint8_t` array, 64 tiles ≈ 16 bytes; cap at ~128 steps and
+  re-path on exhaustion). 10k guests ≈ ~1 MB total;
+- per tile step, route-following costs O(1): take the next direction after a
+  cheap local validation (does the current tile still have that permitted
+  edge — one `PathGetPermittedEdges` call, same cost as today's
+  single-edge case);
+- re-path only on: goal change, route exhaustion, local validation failure,
+  or network invalidation (below).
+
+This drops steady-state search load from ~10–20k/s to **~200–400/s**
+(routes of ~50–100 tiles ending every ~30–60 s of walking per guest), i.e.
+~0.1–0.5 ms per tick amortised — comfortably inside budget, and *cheaper*
+than today's bounded DFS, which burns its 15,000-tile budget per guest per
+tile at every multi-edge junction.
+
+### 6.4 Recomputation: invalidation without storms
+
+"Dynamically recompute from any coordinate" reduces to an invalidation
+policy. Guests are always on (or entering) a tile node, so a re-path can
+start from `NextLoc` at any moment — A* has no warm-up state, which is
+precisely its advantage over the cached-field approach for ad-hoc goals.
+
+- **Global path-network generation counter**: bump on footpath
+  place/remove/edge change, banner change, queue assignment, ride
+  open/close. Each stored route records the generation it was computed
+  under.
+- **Lazy validation, not eager invalidation**: a stale generation does *not*
+  immediately discard the route. The guest keeps walking, validating each
+  next step locally (§6.3); only a failed step — or a periodic staleness
+  check at junctions — enqueues a re-path. Most edits (scenery paths far
+  away) never cost anything. Optional refinement: dirty *regions* (chunk
+  bitmap) so only routes passing near the edit re-path eagerly.
+- **Time-sliced re-path queue**: a deterministic FIFO (ordered by entity id
+  within a tick) with a per-tick budget (e.g. 1–2 ms or N searches). The
+  worst case — deleting a main artery and invalidating thousands of routes
+  at once — drains over a few seconds; affected guests visibly walk on for
+  a moment, hit the missing tile, fall back to local edge-following
+  (today's single-edge behaviour) until their request is serviced. That is
+  graceful degradation, not a freeze.
+- **Per-guest re-path rate limit** (e.g. ≥1 s between full searches) bounds
+  adversarial layouts (players toggling a path tile every tick).
+
+Incremental algorithms (D* Lite / LPA*) are *not* recommended here: they
+repair routes cheaply after edge changes but require per-agent, per-node
+g/rhs state — untenable for thousands of agents, and full A* at ~100 µs is
+cheap enough that invalidate-and-recompute wins on simplicity and memory.
+
+### 6.5 Determinism and multiplayer
+
+All of the above is multiplayer-safe if three rules hold:
+
+1. open-set ordering is fully deterministic (the `(f, h, packedCoord)` heap
+   key — never pointer or hash order);
+2. the re-path queue is drained in game-state order (entity id), budgeted by
+   *count* per tick, not wall-clock time — a time-based budget would desync
+   clients of different speeds; pick N searches/tick and tune N;
+3. randomness (tie-breaks among equal-cost successors, dispersion) comes
+   from `ScenarioRand` only.
+
+Per-guest route storage is runtime state; serialising it in the park file is
+*optional* (routes can be lazily recomputed on load from `PathfindGoal`),
+which keeps the save format untouched — only a version bump if we choose to
+persist routes for perfect determinism across save/load.
+
+### 6.6 Where A* fits relative to distance fields (§4.1)
+
+The two are complements, not competitors:
+
+| Goal type | Best tool | Why |
+|---|---|---|
+| Park entrances / spawns (shared by thousands) | distance field | one BFS amortised over all guests; O(1) decisions; immune to invalidation storms (rebuild is one flood) |
+| Ride entrances (≤ ~255 candidates, hot subset) | either: LRU-cached fields, or per-guest A* routes | fields win when many guests target the same ride; A* wins for the long tail |
+| One-off targets (mechanic to breakdown, guest to specific bench/toilet) | dynamic A* + cached route | unique goal, no reuse to exploit |
+
+A practical end-state: distance fields for the shared goals, dynamic A* with
+route caching for everything else, both running on the same neighbour-
+expansion primitives and the same scratch infrastructure, with the legacy
+bounded DFS deleted. Both approaches also make the wide-path "wall"
+semantics (§4.2) unnecessary — wide tiles become ordinary nodes with a small
+cost penalty.
+
+### 6.7 Verdict
+
+Dynamic A* from any path coordinate is **feasible and safe** under four
+non-negotiable design rules:
+
+1. **never** store search state in the tile map — shared generation-stamped
+   scratch only;
+2. **never** search per tile-step — search per *route*, follow the cached
+   route with O(1) local validation;
+3. **never** recompute eagerly on map edits — lazy validation plus a
+   deterministic, budgeted re-path queue;
+4. **never** let ordering depend on memory layout — deterministic heap keys
+   and `ScenarioRand` only.
+
+Violating rule 2 is what makes naive "just use real A*" proposals fail (and
+is effectively why the original game shipped a crippled DFS); the other
+three rules are what "without rendering the park map useless" means in
+practice: the map stays a pure, unannotated source of truth, saves and
+multiplayer stay byte-compatible, and the per-tick cost stays bounded and
+tunable.
