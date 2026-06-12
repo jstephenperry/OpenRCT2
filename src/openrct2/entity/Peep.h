@@ -306,6 +306,37 @@ namespace OpenRCT2
     struct Guest;
     struct Staff;
 
+    /* A remembered thin junction on the way to the current pathfind goal, with the
+     * edges not yet tried there. Kept compact (8 bytes) because peeps carry 16 of
+     * these and Guest must fit in the fixed-size entity slot. */
+    struct PathfindHistoryEntry
+    {
+        int16_t x;
+        int16_t y;
+        int16_t z;
+        uint8_t direction; // Bitmask of edges not yet tried at this junction.
+
+        constexpr bool matchesLocation(const TileCoordsXYZ& loc) const
+        {
+            return x == loc.x && y == loc.y && z == loc.z;
+        }
+
+        void setLocation(const TileCoordsXYZ& loc)
+        {
+            x = static_cast<int16_t>(loc.x);
+            y = static_cast<int16_t>(loc.y);
+            z = static_cast<int16_t>(loc.z);
+        }
+
+        void setNull()
+        {
+            x = -1;
+            y = -1;
+            z = -1;
+            direction = 0;
+        }
+    };
+
     struct Peep : EntityBase
     {
         char* Name;
@@ -376,7 +407,10 @@ namespace OpenRCT2
         uint32_t PeepId;
         uint8_t PathCheckOptimisation; // see peep.checkForPath
         TileCoordsXYZD PathfindGoal;
-        std::array<TileCoordsXYZD, 4> PathfindHistory;
+        std::array<PathfindHistoryEntry, 16> PathfindHistory;
+        // Ring index of the next PathfindHistory slot to overwrite. Persisted since
+        // park file version 62 (older files carry only 4 history entries).
+        uint8_t PathfindHistoryWriteIndex;
         uint8_t WalkingAnimationFrameNum;
         uint32_t PeepFlags;
 

@@ -27,6 +27,7 @@
 #include "../world/tile_element/PathElement.h"
 #include "../world/tile_element/TileElement.h"
 #include "../world/tile_element/TrackElement.h"
+#include "PathDistanceField.h"
 
 #include <bit>
 #include <bitset>
@@ -37,15 +38,19 @@ namespace OpenRCT2::PathFinding
 {
     // The search limits the maximum junctions by certain conditions.
     static constexpr uint8_t kMaxJunctionsStaff = 8;
-    static constexpr uint8_t kMaxJunctionsGuest = 5;
-    static constexpr uint8_t kMaxJunctionsGuestWithMap = 7;
-    static constexpr uint8_t kMaxJunctionsGuestLeavingPark = 7;
-    static constexpr uint8_t kMaxJunctionsGuestLeavingParkLost = 8;
+    static constexpr uint8_t kMaxJunctionsGuest = 8;
+    static constexpr uint8_t kMaxJunctionsGuestWithMap = 9;
+    static constexpr uint8_t kMaxJunctionsGuestLeavingPark = 9;
+    static constexpr uint8_t kMaxJunctionsGuestLeavingParkLost = 10;
+
+    // Extra steps a wide path tile costs in the heuristic search, so guests still
+    // prefer thin paths where route distances tie, without treating wide paths as
+    // impassable (see docs/guest-pathfinding-analysis.md section 4.2).
+    static constexpr uint8_t kWideTileStepPenalty = 2;
 
     // Maximum amount of junctions.
-    static constexpr uint8_t kMaxJunctions = std::max(
-        { kMaxJunctionsStaff, kMaxJunctionsGuest, kMaxJunctionsGuestWithMap, kMaxJunctionsGuestLeavingPark,
-          kMaxJunctionsGuestLeavingParkLost });
+    static constexpr uint8_t kMaxJunctions = std::max({ kMaxJunctionsStaff, kMaxJunctionsGuest, kMaxJunctionsGuestWithMap,
+                                                        kMaxJunctionsGuestLeavingPark, kMaxJunctionsGuestLeavingParkLost });
 
     struct PathFindingState
     {
@@ -189,7 +194,7 @@ namespace OpenRCT2::PathFinding
     /**
      * Gets the connected edges of a path that are permitted (i.e. no 'no entry' signs)
      */
-    static int32_t PathGetPermittedEdges(bool ignoreBanners, const PathElement* pathElement)
+    int32_t PathGetPermittedEdges(bool ignoreBanners, const PathElement* pathElement)
     {
         return BannerClearPathEdges(ignoreBanners, pathElement, pathElement->GetEdgesAndCorners()) & 0x0F;
     }
@@ -728,14 +733,6 @@ namespace OpenRCT2::PathFinding
     {
         PathSearchResult searchResult = PathSearchResult::Failed;
 
-        bool currentElementIsWide = currentTileElement->asPath()->IsWide();
-        if (currentElementIsWide)
-        {
-            const Staff* staff = peep.as<Staff>();
-            if (staff != nullptr && staff->canIgnoreWideFlag(loc.ToCoordsXYZ(), currentTileElement))
-                currentElementIsWide = false;
-        }
-
         loc += TileDirectionDelta[testEdge];
 
         ++numSteps;
@@ -782,6 +779,7 @@ namespace OpenRCT2::PathFinding
                 continue;
 
             RideId rideIndex = RideId::GetNull();
+            bool tileIsWide = false;
             switch (tileElement->getType())
             {
                 case TileElementType::Track:
@@ -856,15 +854,14 @@ namespace OpenRCT2::PathFinding
                     // Path may be sloped, so set z to path base height.
                     loc.z = tileElement->baseHeight;
 
-                    if (pathElement->IsWide())
+                    /* Wide paths are traversable like any other path, but are tracked so
+                     * that a step penalty keeps guests preferring thin paths and so that
+                     * the junction budget bounds the search inside wide regions. Staff
+                     * that can ignore the wide flag get neither. */
+                    tileIsWide = pathElement->IsWide();
+                    if (tileIsWide && staff != nullptr && staff->canIgnoreWideFlag(loc.ToCoordsXYZ(), tileElement))
                     {
-                        /* Check if staff can ignore this wide flag. */
-                        if (staff == nullptr || !staff->canIgnoreWideFlag(loc.ToCoordsXYZ(), tileElement))
-                        {
-                            searchResult = PathSearchResult::Wide;
-                            found = true;
-                            break;
-                        }
+                        tileIsWide = false;
                     }
 
                     searchResult = PathSearchResult::Thin;
@@ -948,7 +945,7 @@ namespace OpenRCT2::PathFinding
             /* If this map element is not a path, the search cannot be continued.
              * Continue to the next map element without updating the parameters (best result so far). */
             if (searchResult != PathSearchResult::DeadEnd && searchResult != PathSearchResult::Thin
-                && searchResult != PathSearchResult::Junction && searchResult != PathSearchResult::Wide)
+                && searchResult != PathSearchResult::Junction)
             {
                 LogPathfinding(
                     &peep, "Search path ends at %d,%d,%d; Steps: %u; Not a path", loc.x >> 5, loc.y >> 5, loc.z, numSteps);
@@ -956,45 +953,6 @@ namespace OpenRCT2::PathFinding
             }
 
             /* At this point the map element is a path. */
-
-            /* If this is a wide path the search ends here. */
-            if (searchResult == PathSearchResult::Wide)
-            {
-                /* Ignore Wide paths as continuing paths UNLESS
-                 * the current path is also Wide (and, for staff, not ignored).
-                 * This permits a peep currently on a wide path to
-                 * cross other wide paths to reach a thin path.
-                 *
-                 * So, if the current path is also wide the goal could
-                 * still be reachable from here.
-                 * If the search result is better than the best so far
-                 * (in the parameters), then update the parameters with
-                 * this search before continuing to the next map element. */
-                if (currentElementIsWide && (newScore < *endScore || (newScore == *endScore && numSteps < *endSteps)))
-                {
-                    // Update the search results
-                    *endScore = newScore;
-                    *endSteps = numSteps;
-                    // Update the end x,y,z
-                    *endXYZ = loc;
-                    // Update the telemetry
-                    *endJunctions = state.maxJunctions - state.junctionCount;
-                    for (uint8_t junctInd = 0; junctInd < *endJunctions; junctInd++)
-                    {
-                        uint8_t histIdx = state.maxJunctions - junctInd;
-                        junctionList[junctInd].x = state.history[histIdx].location.x;
-                        junctionList[junctInd].y = state.history[histIdx].location.y;
-                        junctionList[junctInd].z = state.history[histIdx].location.z;
-                        directionList[junctInd] = state.history[histIdx].direction;
-                    }
-                }
-                LogPathfinding(
-                    &peep, "Search path ends at %d,%d,%d; Steps: %u; Wide path; Score: %d", loc.x >> 5, loc.y >> 5, loc.z,
-                    numSteps, newScore);
-                continue;
-            }
-
-            /* At this point the map element is a non-wide path.*/
 
             /* Get all the permitted_edges of the map element. */
             Guard::Assert(tileElement->asPath() != nullptr);
@@ -1055,8 +1013,12 @@ namespace OpenRCT2::PathFinding
             if (searchResult == PathSearchResult::Junction)
             {
                 /* Check if this is a thin junction. And perform additional
-                 * necessary checks. */
-                isThinJunction = PathIsThinJunction(tileElement->asPath(), loc);
+                 * necessary checks.
+                 * Wide path tiles with more than 2 edges are tracked like thin
+                 * junctions so the junction budget and loop detection bound the
+                 * search inside wide regions, which would otherwise be explored
+                 * exhaustively (every plaza tile is a junction). */
+                isThinJunction = tileIsWide || PathIsThinJunction(tileElement->asPath(), loc);
 
                 if (isThinJunction)
                 {
@@ -1076,7 +1038,7 @@ namespace OpenRCT2::PathFinding
                      * already been visited by the peep while heading for this goal. */
                     for (auto& pathfindHistory : peep.PathfindHistory)
                     {
-                        if (pathfindHistory == loc)
+                        if (pathfindHistory.matchesLocation(loc))
                         {
                             if (pathfindHistory.direction == 0)
                             {
@@ -1157,7 +1119,12 @@ namespace OpenRCT2::PathFinding
             }
 
             /* Continue searching down each remaining edge of the path
-             * (recursive call). */
+             * (recursive call).
+             * Wide tiles cost extra steps, so that where route distances tie,
+             * routes over thin paths win the steps tie-break. */
+            const uint8_t continueNumSteps = tileIsWide
+                ? static_cast<uint8_t>(std::min<uint32_t>(numSteps + kWideTileStepPenalty, 250u))
+                : numSteps;
             do
             {
                 edges &= ~(1 << nextTestEdge);
@@ -1197,7 +1164,7 @@ namespace OpenRCT2::PathFinding
                 }
 
                 PeepPathfindHeuristicSearch(
-                    state, { loc.x, loc.y, height }, goal, peep, tileElement, nextInPatrolArea, numSteps, endScore,
+                    state, { loc.x, loc.y, height }, goal, peep, tileElement, nextInPatrolArea, continueNumSteps, endScore,
                     nextTestEdge, endJunctions, junctionList, directionList, endXYZ, endSteps);
                 state.junctionCount = savedNumJunctions;
 
@@ -1321,7 +1288,7 @@ namespace OpenRCT2::PathFinding
              * directions it has not yet tried. */
             for (auto& pathfindHistory : peep.PathfindHistory)
             {
-                if (pathfindHistory == loc)
+                if (pathfindHistory.matchesLocation(loc))
                 {
                     /* Fix broken PathfindHistory[i].direction
                      * which have untried directions that are not
@@ -1364,10 +1331,11 @@ namespace OpenRCT2::PathFinding
             peep.PathfindGoal = { goal, 0 };
 
             // Clear pathfinding history
-            TileCoordsXYZD nullPos;
-            nullPos.SetNull();
-
-            std::fill(std::begin(peep.PathfindHistory), std::end(peep.PathfindHistory), nullPos);
+            for (auto& pathfindHistory : peep.PathfindHistory)
+            {
+                pathfindHistory.setNull();
+            }
+            peep.PathfindHistoryWriteIndex = 0;
 
             LogPathfinding(&peep, "New goal; clearing pf_history.");
         }
@@ -1478,7 +1446,11 @@ namespace OpenRCT2::PathFinding
                     }
                 }
 
-                if (score < bestScore || (score == bestScore && endSteps < bestSub))
+                /* Break exact ties randomly rather than always favouring the lowest
+                 * direction number, so equal-quality routes get used evenly and
+                 * crowds do not all make the same choice. */
+                if (score < bestScore || (score == bestScore && endSteps < bestSub)
+                    || (score == bestScore && endSteps == bestSub && score != 0xFFFF && (ScenarioRand() & 1)))
                 {
                     chosenEdge = testEdge;
                     bestScore = score;
@@ -1527,7 +1499,7 @@ namespace OpenRCT2::PathFinding
         {
             for (std::size_t i = 0; i < peep.PathfindHistory.size(); ++i)
             {
-                if (peep.PathfindHistory[i] == loc)
+                if (peep.PathfindHistory[i].matchesLocation(loc))
                 {
                     /* Peep remembers this junction, so remove the
                      * chosen_edge from those left to try. */
@@ -1546,9 +1518,10 @@ namespace OpenRCT2::PathFinding
 
             /* Peep does not remember this junction, so forget a junction
              * and remember this junction. */
-            int32_t i = peep.PathfindGoal.direction++;
-            peep.PathfindGoal.direction &= 3;
-            peep.PathfindHistory[i] = { loc, permittedEdges };
+            int32_t i = peep.PathfindHistoryWriteIndex;
+            peep.PathfindHistoryWriteIndex = (peep.PathfindHistoryWriteIndex + 1) % peep.PathfindHistory.size();
+            peep.PathfindHistory[i].setLocation(loc);
+            peep.PathfindHistory[i].direction = permittedEdges;
             /* Remove the chosen_edge from those left to try. */
             peep.PathfindHistory[i].direction &= ~(1 << chosenEdge);
             /* Also remove the edge through which the peep
@@ -1591,6 +1564,14 @@ namespace OpenRCT2::PathFinding
      */
     int32_t GuestPathFindParkEntranceEntering(Peep& peep, uint8_t edges)
     {
+        /* Prefer the distance field ("network compass"): it always knows the true
+         * walking direction to the nearest entrance regardless of loops, wide
+         * regions or layout complexity. */
+        Direction fieldDirection = ChooseDirectionViaField(
+            DistanceFieldGoal::parkEntrances, TileCoordsXYZ{ peep.NextLoc }, peep);
+        if (fieldDirection != kInvalidDirection)
+            return PeepMoveOneTile(fieldDirection, peep);
+
         // Send peeps to the nearest park entrance.
         auto chosenEntrance = GetNearestParkEntrance(peep.NextLoc);
 
@@ -1637,6 +1618,11 @@ namespace OpenRCT2::PathFinding
      */
     int32_t GuestPathFindPeepSpawn(Peep& peep, uint8_t edges)
     {
+        // Prefer the distance field ("network compass"), fall back to the legacy search.
+        Direction fieldDirection = ChooseDirectionViaField(DistanceFieldGoal::peepSpawns, TileCoordsXYZ{ peep.NextLoc }, peep);
+        if (fieldDirection != kInvalidDirection)
+            return PeepMoveOneTile(fieldDirection, peep);
+
         // Send peeps to the nearest spawn point.
         uint8_t chosenSpawn = GetNearestPeepSpawnIndex(peep.NextLoc.x, peep.NextLoc.y);
 
@@ -1666,6 +1652,14 @@ namespace OpenRCT2::PathFinding
      */
     int32_t GuestPathFindParkEntranceLeaving(Peep& peep, uint8_t edges)
     {
+        /* Prefer the distance field ("network compass"): a guest on any path tile
+         * connected to a park entrance can then never get lost while leaving. The
+         * field routes to the network-nearest entrance. */
+        Direction fieldDirection = ChooseDirectionViaField(
+            DistanceFieldGoal::parkEntrances, TileCoordsXYZ{ peep.NextLoc }, peep);
+        if (fieldDirection != kInvalidDirection)
+            return PeepMoveOneTile(fieldDirection, peep);
+
         TileCoordsXYZ entranceGoal{};
         if (peep.PeepFlags & PEEP_FLAGS_PARK_ENTRANCE_CHOSEN)
         {
@@ -1906,34 +1900,17 @@ namespace OpenRCT2::PathFinding
             return GuestSurfacePathFinding(peep);
         }
 
-        if (!peep.outsideOfPark && peep.headingForRideOrParkExit())
-        {
-            /* If this tileElement is adjacent to any non-wide paths,
-             * remove all of the edges to wide paths. */
-            uint8_t adjustedEdges = edges;
-            for (Direction chosenDirection : kAllDirections)
-            {
-                // If there is no path in that direction try another
-                if (!(adjustedEdges & (1 << chosenDirection)))
-                    continue;
-
-                /* If there is a wide path in that direction,
-                    remove that edge and try another */
-                if (FootpathElementNextInDirection(loc, pathElement, chosenDirection) == PathSearchResult::Wide)
-                {
-                    adjustedEdges &= ~(1 << chosenDirection);
-                }
-            }
-            if (adjustedEdges != 0)
-                edges = adjustedEdges;
-        }
-
         int32_t direction = DirectionReverse(peep.PeepDirection);
         // Check if in a dead end (i.e. only edge is where the peep came from)
         if (!(edges & ~(1 << direction)))
         {
-            // In a dead end.  Check if peep is lost, etc.
-            peep.checkIfLost();
+            /* In a dead end. Check if peep is lost, etc.
+             * Guests wandering without a destination are aimless by design and
+             * are never considered lost. */
+            if (peep.headingForRideOrParkExit())
+            {
+                peep.checkIfLost();
+            }
             peep.checkCantFindRide();
             peep.checkCantFindExit();
         }
@@ -1974,7 +1951,7 @@ namespace OpenRCT2::PathFinding
 
         /* Peep is inside the park.
          * If the peep does not have food, randomly cull the useless directions
-         * (dead ends, ride exits, wide paths) from the edges.
+         * (dead ends, ride exits) from the edges.
          * In principle, peeps with food are not paying as much attention to
          * where they are going and are consequently more like to walk up
          * dead end paths, paths to ride exits, etc. */
@@ -1993,7 +1970,6 @@ namespace OpenRCT2::PathFinding
                 {
                     case PathSearchResult::DeadEnd:
                     case PathSearchResult::RideExit:
-                    case PathSearchResult::Wide:
                         adjustedEdges &= ~(1 << chosenDirection);
                         break;
                     default:

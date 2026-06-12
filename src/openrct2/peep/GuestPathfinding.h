@@ -19,10 +19,14 @@ namespace OpenRCT2
     struct Guest;
     struct Peep;
     struct TileElement;
+    struct PathElement;
 } // namespace OpenRCT2
 
 namespace OpenRCT2::PathFinding
 {
+    // Gets the connected edges of a path that are permitted (i.e. no 'no entry' signs).
+    int32_t PathGetPermittedEdges(bool ignoreBanners, const PathElement* pathElement);
+
     Direction ChooseDirection(
         const TileCoordsXYZ& loc, const TileCoordsXYZ& goal, Peep& peep, bool ignoreForeignQueues, RideId queueRideIndex);
 

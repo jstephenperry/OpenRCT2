@@ -2082,12 +2082,40 @@ namespace OpenRCT2
             cs.readWrite(entity.PathfindGoal.y);
             cs.readWrite(entity.PathfindGoal.z);
             cs.readWrite(entity.PathfindGoal.direction);
-            for (size_t i = 0; i < std::size(entity.PathfindHistory); i++)
+            /* Park file version 62 enlarged the pathfind history from 4 to 16 entries
+             * and added the ring index. Entries are stored as int32 coordinates for
+             * consistency with the original TileCoordsXYZD-based format. */
+            const size_t persistedPathfindHistorySize = version >= 62 ? std::size(entity.PathfindHistory) : size_t(4);
+            for (size_t i = 0; i < persistedPathfindHistorySize; i++)
             {
-                cs.readWrite(entity.PathfindHistory[i].x);
-                cs.readWrite(entity.PathfindHistory[i].y);
-                cs.readWrite(entity.PathfindHistory[i].z);
-                cs.readWrite(entity.PathfindHistory[i].direction);
+                auto& entry = entity.PathfindHistory[i];
+                int32_t x = entry.x;
+                int32_t y = entry.y;
+                int32_t z = entry.z;
+                Direction direction = entry.direction;
+                cs.readWrite(x);
+                cs.readWrite(y);
+                cs.readWrite(z);
+                cs.readWrite(direction);
+                if (cs.getMode() == OrcaStream::Mode::reading)
+                {
+                    entry.x = static_cast<int16_t>(x);
+                    entry.y = static_cast<int16_t>(y);
+                    entry.z = static_cast<int16_t>(z);
+                    entry.direction = direction;
+                }
+            }
+            if (version >= 62)
+            {
+                cs.readWrite(entity.PathfindHistoryWriteIndex);
+            }
+            else if (cs.getMode() == OrcaStream::Mode::reading)
+            {
+                for (size_t i = persistedPathfindHistorySize; i < std::size(entity.PathfindHistory); i++)
+                {
+                    entity.PathfindHistory[i].setNull();
+                }
+                entity.PathfindHistoryWriteIndex = 0;
             }
             cs.readWrite(entity.WalkingAnimationFrameNum);
 

@@ -2272,7 +2272,14 @@ namespace OpenRCT2
                             peep->DestinationY += amountToMove.y;
                             shiftIfNotNull(peep->PathfindGoal, amount);
                             for (auto& h : peep->PathfindHistory)
-                                shiftIfNotNull(h, amount);
+                            {
+                                // Null/garbage history entries have negative coordinates.
+                                if (h.x >= 0 && h.y >= 0)
+                                {
+                                    h.x = static_cast<int16_t>(h.x + amount.x);
+                                    h.y = static_cast<int16_t>(h.y + amount.y);
+                                }
+                            }
                         }
                         break;
                     }

@@ -2738,7 +2738,14 @@ namespace OpenRCT2
         stream << PeepId;
         stream << PathCheckOptimisation;
         stream << PathfindGoal;
-        stream << PathfindHistory;
+        for (auto& entry : PathfindHistory)
+        {
+            stream << entry.x;
+            stream << entry.y;
+            stream << entry.z;
+            stream << entry.direction;
+        }
+        stream << PathfindHistoryWriteIndex;
         stream << WalkingAnimationFrameNum;
         stream << PeepFlags;
     }
@@ -2751,5 +2758,14 @@ namespace OpenRCT2
     {
         PathfindGoal.SetNull();
         PathfindGoal.direction = kInvalidDirection;
+
+        /* Also forget the junction history so that all peeps share the same
+         * "no history" state regardless of whether they were freshly created,
+         * imported or loaded (keeps save/load round trips byte-identical). */
+        for (auto& pathfindHistory : PathfindHistory)
+        {
+            pathfindHistory.setNull();
+        }
+        PathfindHistoryWriteIndex = 0;
     }
 } // namespace OpenRCT2

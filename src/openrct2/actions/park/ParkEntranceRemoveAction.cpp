@@ -13,6 +13,7 @@
 #include "../../GameState.h"
 #include "../../OpenRCT2.h"
 #include "../../management/Finance.h"
+#include "../../peep/PathDistanceField.h"
 #include "../../world/Entrance.h"
 #include "../../world/Map.h"
 #include "../../world/Park.h"
@@ -94,6 +95,7 @@ namespace OpenRCT2::GameActions
             { _loc.x - CoordsDirectionDelta[direction].x, _loc.y - CoordsDirectionDelta[direction].y, _loc.z });
 
         park.entrances.erase(park.entrances.begin() + entranceIndex);
+        PathFinding::InvalidateDistanceFields();
         return res;
     }
 

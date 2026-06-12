@@ -216,7 +216,11 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(
         SimplePathfindingScenario("StraightFlat", { 19, 15, 14 }, 24), SimplePathfindingScenario("SBend", { 15, 12, 14 }, 87),
         SimplePathfindingScenario("UBend", { 17, 9, 14 }, 87), SimplePathfindingScenario("CBend", { 14, 5, 14 }, 164),
-        SimplePathfindingScenario("TwoEqualRoutes", { 9, 13, 14 }, 89),
+        /* TwoEqualRoutes was originally baselined at 89 steps with the legacy
+         * lowest-direction tie-breaking; randomised tie-breaking (with the fixed
+         * test seed) deterministically picks the other equal route, reaching the
+         * goal in 82 steps. */
+        SimplePathfindingScenario("TwoEqualRoutes", { 9, 13, 14 }, 82),
         SimplePathfindingScenario("TwoUnequalRoutes", { 3, 13, 14 }, 89),
         SimplePathfindingScenario("StraightUpBridge", { 12, 15, 14 }, 24),
         SimplePathfindingScenario("StraightUpSlope", { 14, 15, 14 }, 24),

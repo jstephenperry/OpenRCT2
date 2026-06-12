@@ -31,6 +31,7 @@
 #include "../object/ObjectManager.h"
 #include "../object/PathAdditionEntry.h"
 #include "../paint/VirtualFloor.h"
+#include "../peep/PathDistanceField.h"
 #include "../ride/RideData.h"
 #include "../ride/TrackData.h"
 #include "../ride/ted/TrackElementDescriptor.h"
@@ -734,6 +735,9 @@ namespace OpenRCT2
     {
         FootpathNeighbourList neighbourList;
         FootpathNeighbour neighbour;
+
+        // Path connectivity is changing; goal distance fields must be recomputed.
+        PathFinding::InvalidateDistanceFields();
 
         FootpathUpdateQueueChains();
 
@@ -1760,6 +1764,9 @@ namespace OpenRCT2
      */
     void FootpathRemoveEdgesAt(const CoordsXY& footpathPos, TileElement* tileElement)
     {
+        // Path connectivity is changing; goal distance fields must be recomputed.
+        PathFinding::InvalidateDistanceFields();
+
         if (tileElement->getType() == TileElementType::Track)
         {
             auto rideIndex = tileElement->asTrack()->GetRideIndex();

@@ -239,7 +239,7 @@ struct GameStateSnapshots final : public IGameStateSnapshots
         std::memcpy(&valB, &spriteCmp.field, sizeof(struc::field));                                                            \
         uintptr_t offset = reinterpret_cast<uintptr_t>(&spriteBase.field) - reinterpret_cast<uintptr_t>(&spriteBase);          \
         changeData.diffs.push_back(                                                                                            \
-            GameStateSpriteChange::Diff{ static_cast<size_t>(offset), sizeof(struc::field), #struc, #field, valA, valB });     \
+            GameStateSpriteChange::Diff { static_cast<size_t>(offset), sizeof(struc::field), #struc, #field, valA, valB });    \
     }
 
     void CompareSpriteDataCommon(
@@ -307,6 +307,7 @@ struct GameStateSnapshots final : public IGameStateSnapshots
             COMPARE_FIELD(Peep, PathfindHistory[i].z);
             COMPARE_FIELD(Peep, PathfindHistory[i].direction);
         }
+        COMPARE_FIELD(Peep, PathfindHistoryWriteIndex);
         COMPARE_FIELD(Peep, WalkingAnimationFrameNum);
         COMPARE_FIELD(Peep, PeepFlags);
     }

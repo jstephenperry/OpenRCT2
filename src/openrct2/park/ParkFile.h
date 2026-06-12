@@ -19,10 +19,12 @@ namespace OpenRCT2
     struct ObjectRepositoryItem;
 
     // Current version that is saved.
-    constexpr uint32_t kParkFileCurrentVersion = 61;
+    // Version 62: PathfindHistory enlarged from 4 to 16 entries (plus ring index).
+    constexpr uint32_t kParkFileCurrentVersion = 62;
 
     // The minimum version that is forwards compatible with the current version.
-    constexpr uint32_t kParkFileMinVersion = 57;
+    // Bumped to 62 because older readers expect exactly 4 PathfindHistory entries.
+    constexpr uint32_t kParkFileMinVersion = 62;
 
     // The minimum version that is backwards compatible with the current version.
     // If this is increased beyond 0, uncomment the checks in ParkFile.cpp and Context.cpp!

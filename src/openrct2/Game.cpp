@@ -50,6 +50,7 @@
 #include "object/ObjectEntryManager.h"
 #include "object/ObjectList.h"
 #include "object/WaterEntry.h"
+#include "peep/PathDistanceField.h"
 #include "platform/Platform.h"
 #include "rct12/CSStringConverter.h"
 #include "ride/Ride.h"
@@ -388,6 +389,9 @@ void GameLoadInit()
     }
     getGameState().entities.ResetEntitySpatialIndices();
     ResetAllSpriteQuadrantPlacements();
+
+    // The previous park's pathfinding distance fields are invalid for this map.
+    PathFinding::InvalidateDistanceFields();
 
     gWindowUpdateTicks = 0;
     gCurrentRealTimeTicks = 0;

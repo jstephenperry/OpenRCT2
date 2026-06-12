@@ -3,6 +3,7 @@
 #include "../../object/BannerSceneryEntry.h"
 #include "../../object/ObjectEntryManager.h"
 #include "../../object/ObjectManager.h"
+#include "../../peep/PathDistanceField.h"
 #include "../Banner.h"
 
 namespace OpenRCT2
@@ -51,10 +52,13 @@ namespace OpenRCT2
     {
         AllowedEdges &= ~0b00001111;
         AllowedEdges |= (newEdges & 0b00001111);
+        // 'No entry' restrictions affect path connectivity for guests.
+        PathFinding::InvalidateDistanceFields();
     }
 
     void BannerElement::ResetAllowedEdges()
     {
         AllowedEdges |= 0b00001111;
+        PathFinding::InvalidateDistanceFields();
     }
 } // namespace OpenRCT2

@@ -1,5 +1,23 @@
 # Guest Pathfinding Analysis
 
+> **Implementation status:** Phases 1–3 below are implemented on this branch:
+> - Phase 1: `PathfindHistory` enlarged 4 → 16 entries (with a dedicated ring
+>   index, decoupled from `PathfindGoal.direction`; on-disk format unchanged —
+>   only the first 4 entries persist), randomised tie-breaking between
+>   equal-score edges, junction budgets raised (guest 5 → 8).
+> - Phase 2: wide paths are traversable (step penalty + junction-budget
+>   tracking inside wide regions instead of search termination); the wide-edge
+>   pruning and wide-direction culling in `CalculateNextDestination` are gone.
+> - Phase 3: goal-rooted distance fields (`peep/PathDistanceField.{h,cpp}`)
+>   for park entrances and peep spawns, used by
+>   `GuestPathFindParkEntranceEntering/Leaving` and `GuestPathFindPeepSpawn`
+>   with automatic fallback to the legacy search; invalidation hooks in
+>   `FootpathConnectEdges`, `FootpathRemoveEdgesAt`, banner edge changes, park
+>   entrance removal, peep spawn placement and `GameLoadInit`, plus a
+>   4096-tick age refresh as a safety net.
+> - Section 8: `checkIfLost` is now gated on having a destination — aimless
+>   guests are never "lost".
+
 This document analyses how guest pathfinding works in OpenRCT2 today, explains
 the structural reasons guests get lost, and recommends a path toward
 eliminating the major classes of pathfinding bugs — in particular:

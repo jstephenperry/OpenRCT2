@@ -15,6 +15,7 @@
 #include "../../core/MemoryStream.h"
 #include "../../localisation/StringIds.h"
 #include "../../management/Finance.h"
+#include "../../peep/PathDistanceField.h"
 #include "../../world/Footpath.h"
 #include "../../world/Map.h"
 #include "../../world/Park.h"
@@ -89,6 +90,9 @@ namespace OpenRCT2::GameActions
         auto res = Result();
         res.expenditure = ExpenditureType::landPurchase;
         res.position = _location;
+
+        // Spawn locations are distance field goals.
+        PathFinding::InvalidateDistanceFields();
 
         // Shift the spawn point to the edge of the tile
         auto spawnPos = CoordsXY{ _location.ToTileCentre() }

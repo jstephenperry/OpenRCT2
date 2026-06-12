@@ -1736,19 +1736,25 @@ namespace OpenRCT2::RCT2
                 dst->PathfindGoal = { src->PathfindGoal.x, src->PathfindGoal.y, src->PathfindGoal.z,
                                       src->PathfindGoal.direction };
             }
+            // The RCT2 history (4 entries) is smaller than the OpenRCT2 history.
             for (size_t i = 0; i < std::size(src->PathfindHistory); i++)
             {
                 if (isNullLocation(src->PathfindHistory[i]))
                 {
-                    dst->PathfindHistory[i].SetNull();
-                    dst->PathfindHistory[i].direction = kInvalidDirection;
+                    dst->PathfindHistory[i].setNull();
                 }
                 else
                 {
-                    dst->PathfindHistory[i] = { src->PathfindHistory[i].x, src->PathfindHistory[i].y, src->PathfindHistory[i].z,
-                                                src->PathfindHistory[i].direction };
+                    dst->PathfindHistory[i].setLocation(
+                        TileCoordsXYZ{ src->PathfindHistory[i].x, src->PathfindHistory[i].y, src->PathfindHistory[i].z });
+                    dst->PathfindHistory[i].direction = src->PathfindHistory[i].direction;
                 }
             }
+            for (size_t i = std::size(src->PathfindHistory); i < std::size(dst->PathfindHistory); i++)
+            {
+                dst->PathfindHistory[i].setNull();
+            }
+            dst->PathfindHistoryWriteIndex = 0;
             dst->WalkingAnimationFrameNum = src->NoActionFrameNum;
         }
 
