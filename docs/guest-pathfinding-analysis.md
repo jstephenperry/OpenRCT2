@@ -643,3 +643,72 @@ registry already required by §4.5's plaza nodes. Recommended order:
    risk;
 4. occupancy-aware scoring with damping (§7.2–7.3) — incremental polish,
    gated behind the same region-entry decision point.
+
+---
+
+## 8. Keeping "lost" as a gameplay mechanic on complex networks
+
+Design decisions adopted for this effort:
+
+- **Aimless guests stay dumb but are never "lost."** Wandering without a
+  goal keeps the cheap random walk (`GuestPathfindAimless`); the lost
+  state, lost thoughts and `timeLost` accounting are gated on *having a
+  goal*. (Today `checkIfLost` can fire for any walker at a dead end — that
+  check moves behind a goal test.)
+- **Goal-seeking guests use exact routing** (distance fields / cached A*),
+  so they can no longer get *accidentally* lost — which would silently
+  delete a gameplay mechanic: spaghetti layouts are supposed to cost
+  something. The mechanic is retained by **simulating lostness instead of
+  stumbling into it**.
+
+### 8.1 The wrong-turn model
+
+The engine always knows the optimal edge at every junction. A goal-seeking
+guest, however, *follows* it imperfectly:
+
+- At each **thin junction** on the route, the guest takes the correct edge
+  with probability `1 − p`, or deliberately takes a wrong (non-optimal)
+  edge with probability `p`, drawn via `ScenarioRand`.
+- After a wrong turn the guest simply re-paths from wherever it ends up.
+  Because the underlying routing always converges, a wrong turn is a
+  **bounded detour**, never a deadlock: the player-facing symptom (guest
+  wanders off, complains, arrives late) is preserved; the pathological
+  symptom (guest orbits a loop forever, park rating death-spiral the player
+  cannot fix) is impossible.
+- `p` is a single tunable function of *measured complexity*:
+  - junction degree (4-way > 3-way) and junction density along the route;
+  - junctions traversed since the route began (fatigue/attention);
+  - guest attributes: happiness, tiredness, intoxication-adjacent stats;
+  - **park map item**: reduces `p` — the map finally gets a mechanically
+    honest effect (today it merely raises a search limit, §1.2);
+  - banners/signage: "no entry" already prunes edges; wayfinding elements
+    can subtract from `p` later, giving players counterplay.
+
+### 8.2 Lost state, thoughts and rating
+
+"Lost" becomes an explicit, observable condition instead of a side effect:
+track wrong turns / detour distance over a sliding window; crossing a
+threshold sets the lost state, fires the existing thought
+(`PeepThoughtType::lost`), applies the existing happiness penalty, and
+feeds the existing park-rating penalty for lost leaving guests
+(`world/Park.cpp`). Recovery is automatic as the guest converges on the
+goal. `checkCantFindRide`/`checkCantFindExit` keep their countdown
+behaviour but are driven by the wrong-turn model rather than dead-end
+collisions.
+
+### 8.3 Why this preserves the design intent
+
+Route complexity is measurable for free: the number of thin-junction
+decisions along the optimal route (countable during field descent or from
+the cached A* route). Expected detour grows with junction count, so:
+
+- simple radial/grid parks → guests almost never lost (p compounds rarely);
+- maze parks → frequent wrong turns, lost thoughts, longer effective
+  journeys, rating pressure — *the same punishment as today*, but fair,
+  deterministic, tunable in one place, and fixable by the player through
+  layout and signage rather than by fighting search-limit artefacts.
+
+The complexity metric can also feed ride choice later (guests decline
+rides whose route complexity exceeds their tolerance, making "I can't find
+X" honest), but that is balance work, deferred until the core upgrade is
+proven.
