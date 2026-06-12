@@ -492,3 +492,154 @@ three rules are what "without rendering the park map useless" means in
 practice: the map stays a pure, unannotated source of truth, saves and
 multiplayer stay byte-compatible, and the per-tick cost stays bounded and
 tunable.
+
+---
+
+## 7. A "load balancer" for wide paths: direct macro routes, fan-out at the micro level
+
+The idea: routing computes the most efficient *direct* route as if a wide
+street were one logical path; when a guest reaches a *conceptual* wide-path
+intersection or corridor, a balancing layer fans guests out across the
+width. This is architecturally sound — it is the missing micro layer that
+completes §4/§6 — and it is what finally makes a 3-wide boulevard *behave*
+and *look* like a boulevard. Analysis below.
+
+### 7.1 Two layers, cleanly separated
+
+**Macro (routing) layer.** Collapse contiguous wide path tiles (same z,
+connected) into **regions**: linear regions are *corridors* (with a width
+W and a centreline), blobby ones are *plazas*. Where a region meets thin
+paths, other regions, or goal tiles, it exposes **portals** — and a portal
+spanning a W-tile street face is one portal with W member tiles, not W
+portals. The router (distance field §4.1 or A* §6) runs over this
+conceptual graph and emits portal-to-portal routes: "cross plaza R via
+portal P₂", never "walk tile (x,y)". Route length, cost and optimality are
+decided here, once, and lane choice cannot affect them (all member tiles of
+a portal are equivalent to within ±W tiles of cost).
+
+**Micro (balancing) layer.** On *entering* a region toward exit portal P,
+the guest is assigned a **lane target**: which of P's member tiles to steer
+for. Inside the region the guest walks a straight interpolated line to that
+tile (the region is all-walkable by construction, modulo internal obstacles,
+§7.5). The balancer runs only at region entry and at conceptual
+intersections — never per tile — so its cost is negligible.
+
+A crossing of two 3-wide streets is then a single 3×3 *conceptual
+intersection node* with four 3-tile portals. A guest entering lane *i* and
+leaving via lane *j* of the next portal cuts diagonally across the block.
+Fan-out across the W×W tiles is an automatic consequence of lane
+assignment; nobody needs to path through the intersection tile-by-tile.
+
+### 7.2 Balancing policies (cheapest first)
+
+1. **Static hash** — `lane = entityId % W`. Stateless, uniform in
+   expectation, deterministic, free. Because a guest's hash is stable, it
+   also produces natural *lane keeping* (guests hold their line through
+   consecutive regions) — already a large visual win over today's
+   centre-line conga.
+2. **Occupancy-aware (join-shortest-lane)** — sample guest counts on each
+   candidate lane's next few tiles and pick the least loaded. The data is
+   already there: the entity spatial index (`EntityRegistry`,
+   `EntityTileList<Guest>(loc)`) is maintained on every entity move, so a
+   count is an O(occupants) iteration per candidate tile, W ≤ ~4 candidates,
+   only at region entry. No new bookkeeping at all.
+3. **Turn-aligned bias** — weight lanes toward the side of the guest's next
+   turn (exit portal side), so right-turning guests drift right early. This
+   cuts crossing flows inside intersections and, with a consistent global
+   side bias, reproduces the emergent "lane formation" seen in real
+   pedestrian dynamics — entirely cosmetic, entirely free.
+
+A practical scorer combines them:
+`score(lane) = α·occupancy + β·lateralDistance(currentLane, lane) +
+γ·turnAlignment`, choose the minimum, break ties with `ScenarioRand`.
+
+### 7.3 The feedback-loop hazard (and why naive balancing oscillates)
+
+Any occupancy-feedback system herds: if every guest re-balances every tile,
+the emptiest lane instantly becomes the fullest ("thundering herd"), guests
+zig-zag, and the street looks worse than before. Standard mitigations, all
+cheap and deterministic:
+
+- **decide rarely**: lane choice only at region entry/intersections (the
+  design above already guarantees this);
+- **hysteresis**: once assigned, switch lanes mid-corridor only if the
+  occupancy delta exceeds a threshold (or never — corridors are short);
+- **probabilistic assignment**: choose lanes with probability inversely
+  proportional to load via `ScenarioRand`, rather than argmin — spreads
+  simultaneous arrivals without synchronised stampedes;
+- **staggering**: guests already update on offset schedules
+  (`tick128UpdateGuest` masks by entity index); reuse the same idiom if
+  periodic re-balancing is ever wanted.
+
+The β·lateralDistance term doubles as damping: switching two lanes over must
+win by a margin, so micro-oscillation is structurally impossible.
+
+### 7.4 What "load" actually means here — an honest caveat
+
+OpenRCT2 peeps do not collide or block one another on open paths (only
+queues serialise guests). A balancer therefore does **not** change transit
+times or throughput — there is no congestion physics to relieve. What it
+changes is:
+
+- **believability**: wide streets carry distributed streams instead of a
+  single-file line down one tile — this is the visible symptom players
+  actually complain about;
+- **density artefacts**: clumping concentrates litter, vandalism checks,
+  bin/bench contention and "watching rides" clustering onto one tile-line;
+- the **±3-unit centre-line clamp** in `PeepMoveOneTile`
+  (`GuestPathfinding.cpp`) — today's only dispersion mechanism, which can
+  spread guests across one tile's 32 units but never across tiles, and whose
+  own comments admit it is a workaround. Lane targets subsume it: steering
+  aims at the lane tile's centre with the same small jitter, and the clamp's
+  "outlier drift" problem disappears because the lane target is absolute,
+  not relative.
+
+So the correct framing is: the macro layer (§4/§6) fixes *navigation*
+correctness on wide paths; the load balancer fixes *presentation and
+distribution*. Both are needed for wide paths to "work", but they are
+different bugs.
+
+### 7.5 Practical constraints
+
+- **Region registry**: connected-component labelling over wide tiles,
+  maintained incrementally with the same dirty-region machinery as the
+  distance fields (§4.1) — path edits are localised, so relabelling is
+  cheap. Storage: sparse `tile → regionId (uint16)` map plus per-region
+  portal arrays; a few bytes per wide tile.
+- **Per-guest state**: region id + lane target ≈ 3 bytes, runtime-only —
+  recomputed on load, so **no save-format change**.
+- **Internal obstacles**: benches/lamps placed on plaza tiles, and "0-edge"
+  decorative tiles, can interrupt a straight lane line. The lane line must
+  be validated like any route step (§6.3 local validation); on failure,
+  steer one tile around via the neighbouring lane. Plazas with heavy
+  furniture degrade to today's behaviour, never worse.
+- **Don't balance trivial regions**: a 2×2 bulge or a single widened tile
+  should not trigger lane logic (threshold on region size/length), or
+  guests visibly jitter at every kink.
+- **In-region destinations**: a guest whose goal is *inside* the region
+  (shop front on a plaza, bench, bin) gets the goal tile as its lane target
+  directly — the balancer only applies to through-traffic.
+- **Queues**: queue tiles are never wide (`FootpathCanBeWide` excludes
+  them), so queue logic is untouched.
+- **Determinism**: occupancy counts are pure game state and
+  order-independent (counting, not selecting-first); tie-breaks use
+  `ScenarioRand`; lane assignment happens inside the simulation tick. Safe
+  for multiplayer and replays.
+
+### 7.6 Verdict and sequencing
+
+The load-balancer concept is the right shape: it keeps the router operating
+on a small conceptual graph (cheap, optimal, loop-proof) and pushes
+width-handling into an O(1)-per-region-entry steering decision that has no
+effect on route optimality and no new data structures beyond the region
+registry already required by §4.5's plaza nodes. Recommended order:
+
+1. wide paths traversable (§4.2) — prerequisite, makes regions walkable to
+   the router;
+2. region registry + portals (subset of §4.5, also reusable by the
+   hierarchical graph later);
+3. static-hash lane assignment + lane-target steering in `PeepMoveOneTile`
+   (replaces the centre-line clamp) — most of the visual benefit, near-zero
+   risk;
+4. occupancy-aware scoring with damping (§7.2–7.3) — incremental polish,
+   gated behind the same region-entry decision point.
