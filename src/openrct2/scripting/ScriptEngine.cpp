@@ -810,6 +810,30 @@ void ScriptEngine::RefreshPlugins()
     }
 }
 
+void ScriptEngine::SynchronisePluginsWithDisk()
+{
+    if (!_initialised)
+        return;
+
+    RefreshPlugins();
+
+    // Start any newly registered plugins according to the current lifecycle state.
+    // Plugins that were removed have already been stopped by RefreshPlugins.
+    for (auto& plugin : _plugins)
+    {
+        if (plugin->HasStarted() || plugin->IsLoaded())
+            continue;
+
+        bool shouldStart = plugin->IsTransient() ? (_transientPluginsStarted && ShouldStartPlugin(plugin))
+                                                 : _intransientPluginsStarted;
+        if (shouldStart)
+        {
+            LoadPlugin(plugin);
+            StartPlugin(plugin);
+        }
+    }
+}
+
 std::vector<std::string> ScriptEngine::GetPluginFiles() const
 {
     // Scan for .js files in plugin directory

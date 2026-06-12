@@ -232,6 +232,8 @@ namespace OpenRCT2::Config
     {
         bool enableHotReloading;
         u8string allowedHosts;
+        // Space-separated list of user-managed plugin store source URLs
+        u8string storeSources;
     };
 
     struct Config

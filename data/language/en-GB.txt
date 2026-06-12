@@ -3829,3 +3829,24 @@ STR_7029    :Quarter Helix down
 STR_7030    :{WINDOW_COLOUR_2}Guests entertained: {BLACK}{COMMA32}
 STR_7031    :Disable grass growing
 STR_7032    :Disable grass ageing so that it doesn't grow.
+STR_7033    :Plugin Manager
+STR_7034    :Installed
+STR_7035    :Available
+STR_7036    :Sources
+STR_7037    :Open plugins folder
+STR_7038    :Uninstall
+STR_7039    :Install
+STR_7040    :Reinstall
+STR_7041    :Refresh
+STR_7042    :Open webpage
+STR_7043    :Add source
+STR_7044    :Remove source
+STR_7045    :Enter the URL of a plugin source (JSON)
+STR_7046    :Installed plugins: {COMMA16}
+STR_7047    :Available plugins: {COMMA16}
+STR_7048    :Fetching plugin list...
+STR_7049    :Unable to fetch plugin list: {STRING}
+STR_7050    :Installing: {STRING}
+STR_7051    :Installed: {STRING}
+STR_7052    :Unable to install plugin
+STR_7053    :Official plugin index (GitHub topic: openrct2-plugin)

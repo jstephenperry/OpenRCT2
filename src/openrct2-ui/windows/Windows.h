@@ -202,6 +202,11 @@ namespace OpenRCT2::Ui::Windows
     // Player
     WindowBase* PlayerOpen(uint8_t id);
 
+#ifdef ENABLE_SCRIPTING
+    // PluginManager
+    WindowBase* PluginManagerOpen();
+#endif
+
     // ProgressWindow
     WindowBase* ProgressWindowOpen(const std::string& text, CloseCallback onClose = nullptr);
     void ProgressWindowSet(uint32_t currentProgress, uint32_t totalCount, StringId format = kStringIdNone);

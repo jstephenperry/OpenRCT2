@@ -639,6 +639,7 @@ namespace OpenRCT2::Config
             auto model = &_config.plugin;
             model->enableHotReloading = reader->GetBoolean("enable_hot_reloading", false);
             model->allowedHosts = reader->GetString("allowed_hosts", "");
+            model->storeSources = reader->GetString("store_sources", "");
         }
     }
 
@@ -648,6 +649,7 @@ namespace OpenRCT2::Config
         writer->WriteSection("plugin");
         writer->WriteBoolean("enable_hot_reloading", model->enableHotReloading);
         writer->WriteString("allowed_hosts", model->allowedHosts);
+        writer->WriteString("store_sources", model->storeSources);
     }
 
     bool SetDefaults()

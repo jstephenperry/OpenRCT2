@@ -225,6 +225,7 @@ namespace OpenRCT2::Scripting
 
         void Initialise();
         JSContext* CreateContext() const;
+        void SynchronisePluginsWithDisk();
         void LoadTransientPlugins();
         void UnloadTransientPlugins();
         void StopUnloadRegisterAllPlugins();

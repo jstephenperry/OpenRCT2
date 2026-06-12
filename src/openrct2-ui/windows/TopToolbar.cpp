@@ -8,6 +8,7 @@
  *****************************************************************************/
 
 #include "../UiContext.h"
+#include "../UiStringIds.h"
 #include "../interface/InGameConsole.h"
 #include "../scripting/CustomMenu.h"
 
@@ -113,9 +114,16 @@ namespace OpenRCT2::Ui::Windows
         DDIDX_FILE_BUG_ON_GITHUB = 10,
         DDIDX_UPDATE_AVAILABLE = 11,
         DDIDX_OPTIONS = 12,
+#ifdef ENABLE_SCRIPTING
+        DDIDX_PLUGIN_MANAGER = 13,
+        // separator
+        DDIDX_QUIT_TO_MENU = 15,
+        DDIDX_EXIT_OPENRCT2 = 16,
+#else
         // separator
         DDIDX_QUIT_TO_MENU = 14,
         DDIDX_EXIT_OPENRCT2 = 15,
+#endif
     };
 
     enum TopToolbarViewMenuDdidx
@@ -574,6 +582,9 @@ namespace OpenRCT2::Ui::Windows
                     gDropdown.items[numItems++] = Dropdown::PlainMenuLabel(STR_UPDATE_AVAILABLE);
 
                 gDropdown.items[numItems++] = Dropdown::PlainMenuLabel(STR_OPTIONS);
+#ifdef ENABLE_SCRIPTING
+                gDropdown.items[numItems++] = Dropdown::PlainMenuLabel(STR_PLUGIN_MANAGER_TITLE);
+#endif
                 gDropdown.items[numItems++] = Dropdown::Separator();
 
                 if (gLegacyScene == LegacyScene::trackDesigner)
@@ -599,6 +610,9 @@ namespace OpenRCT2::Ui::Windows
                     gDropdown.items[numItems++] = Dropdown::PlainMenuLabel(STR_UPDATE_AVAILABLE);
 
                 gDropdown.items[numItems++] = Dropdown::PlainMenuLabel(STR_OPTIONS);
+#ifdef ENABLE_SCRIPTING
+                gDropdown.items[numItems++] = Dropdown::PlainMenuLabel(STR_PLUGIN_MANAGER_TITLE);
+#endif
                 gDropdown.items[numItems++] = Dropdown::Separator();
                 gDropdown.items[numItems++] = Dropdown::PlainMenuLabel(STR_QUIT_SCENARIO_EDITOR);
                 gDropdown.items[numItems++] = Dropdown::PlainMenuLabel(STR_EXIT_OPENRCT2);
@@ -621,6 +635,9 @@ namespace OpenRCT2::Ui::Windows
                     gDropdown.items[numItems++] = Dropdown::PlainMenuLabel(STR_UPDATE_AVAILABLE);
 
                 gDropdown.items[numItems++] = Dropdown::PlainMenuLabel(STR_OPTIONS);
+#ifdef ENABLE_SCRIPTING
+                gDropdown.items[numItems++] = Dropdown::PlainMenuLabel(STR_PLUGIN_MANAGER_TITLE);
+#endif
                 gDropdown.items[numItems++] = Dropdown::Separator();
                 gDropdown.items[numItems++] = Dropdown::PlainMenuLabel(STR_QUIT_TO_MENU);
                 gDropdown.items[numItems++] = Dropdown::PlainMenuLabel(STR_EXIT_OPENRCT2);
@@ -980,6 +997,11 @@ namespace OpenRCT2::Ui::Windows
                         case DDIDX_OPTIONS:
                             ContextOpenWindow(WindowClass::options);
                             break;
+#ifdef ENABLE_SCRIPTING
+                        case DDIDX_PLUGIN_MANAGER:
+                            ContextOpenWindow(WindowClass::pluginManager);
+                            break;
+#endif
                         case DDIDX_SCREENSHOT:
                             gScreenshotCountdown = 10;
                             break;

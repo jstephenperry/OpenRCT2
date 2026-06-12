@@ -162,6 +162,10 @@ public:
                 return AssetPacksOpen();
             case WindowClass::editorParkEntrance:
                 return EditorParkEntranceOpen();
+#ifdef ENABLE_SCRIPTING
+            case WindowClass::pluginManager:
+                return PluginManagerOpen();
+#endif
             default:
                 Console::Error::WriteLine("Unhandled window class (%d)", wc);
                 return nullptr;

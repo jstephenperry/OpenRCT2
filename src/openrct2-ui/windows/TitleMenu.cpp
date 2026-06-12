@@ -7,6 +7,8 @@
  * OpenRCT2 is licensed under the GNU General Public License version 3.
  *****************************************************************************/
 
+#include "../UiStringIds.h"
+
 #include <openrct2-ui/interface/Dropdown.h>
 #include <openrct2-ui/interface/Widget.h>
 #include <openrct2-ui/scripting/CustomMenu.h>
@@ -45,7 +47,12 @@ namespace OpenRCT2::Ui::Windows
         DDIDX_TRACK_DESIGNER,
         DDIDX_TRACK_MANAGER,
         DDIDX_OPEN_CONTENT_FOLDER,
+#ifdef ENABLE_SCRIPTING
+        DDIDX_PLUGIN_MANAGER,
+        DDIDX_CUSTOM_BEGIN = 7,
+#else
         DDIDX_CUSTOM_BEGIN = 6,
+#endif
     };
 
     static constexpr ScreenSize MenuButtonDims = { 82, 82 };
@@ -188,6 +195,8 @@ namespace OpenRCT2::Ui::Windows
                 gDropdown.items[i++] = Dropdown::PlainMenuLabel(STR_OPEN_USER_CONTENT_FOLDER);
 
 #ifdef ENABLE_SCRIPTING
+                gDropdown.items[i++] = Dropdown::PlainMenuLabel(STR_PLUGIN_MANAGER_TITLE);
+
                 auto hasCustomItems = false;
                 const auto& customMenuItems = Scripting::CustomMenuItems;
                 if (!customMenuItems.empty())
@@ -252,6 +261,11 @@ namespace OpenRCT2::Ui::Windows
                         uiContext.OpenFolder(env.GetDirectoryPath(DirBase::user));
                         break;
                     }
+#ifdef ENABLE_SCRIPTING
+                    case DDIDX_PLUGIN_MANAGER:
+                        ContextOpenWindow(WindowClass::pluginManager);
+                        break;
+#endif
                     default:
                         InvokeCustomToolboxMenuItem(selectedIndex - DDIDX_CUSTOM_BEGIN);
                         break;
