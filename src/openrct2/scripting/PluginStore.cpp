@@ -16,7 +16,7 @@
     #include "../PlatformEnvironment.h"
     #include "../config/Config.h"
     #include "../core/File.h"
-    #include "../core/FileScanner.h"
+    #include "../core/FileSystem.hpp"
     #include "../core/Http.h"
     #include "../core/Json.hpp"
     #include "../core/Path.hpp"
@@ -24,6 +24,7 @@
 
     #include <mutex>
     #include <stdexcept>
+    #include <system_error>
 
 namespace OpenRCT2::Scripting::PluginStore
 {
@@ -36,6 +37,10 @@ namespace OpenRCT2::Scripting::PluginStore
     // Guards reads and writes of the manifest file, which can happen from both the
     // UI thread and download worker threads.
     static std::mutex _manifestMutex;
+
+    // Guards reads and writes of Config::Get().plugin.storeSources, which the fetch
+    // worker thread reads while the UI thread may add/remove sources concurrently.
+    static std::mutex _sourcesMutex;
 
     static u8string GetPluginDirectory()
     {
@@ -121,8 +126,16 @@ namespace OpenRCT2::Scripting::PluginStore
     std::vector<std::string> GetCustomSources()
     {
         std::vector<std::string> result;
+        // Snapshot the config string under the lock before splitting: String::split
+        // returns string_views into the buffer, so we must not let the UI thread
+        // reassign storeSources (reallocating it) while the worker iterates them.
+        u8string sources;
+        {
+            std::lock_guard guard(_sourcesMutex);
+            sources = Config::Get().plugin.storeSources;
+        }
         // Sources are stored space-separated; URLs never contain literal spaces
-        for (auto part : String::split(Config::Get().plugin.storeSources, " "))
+        for (auto part : String::split(sources, " "))
         {
             if (!part.empty())
             {
@@ -143,7 +156,10 @@ namespace OpenRCT2::Scripting::PluginStore
             }
             value.append(source);
         }
-        Config::Get().plugin.storeSources = value;
+        {
+            std::lock_guard guard(_sourcesMutex);
+            Config::Get().plugin.storeSources = value;
+        }
         Config::Save();
     }
 
@@ -461,6 +477,7 @@ namespace OpenRCT2::Scripting::PluginStore
         auto files = it->find("files");
         if (files != it->end() && files->is_array())
         {
+            std::vector<u8string> directories;
             for (const auto& file : *files)
             {
                 auto relativePath = Json::GetString(file);
@@ -470,12 +487,22 @@ namespace OpenRCT2::Scripting::PluginStore
                 auto absolutePath = Path::Combine(pluginDir, relativePath);
                 File::Delete(absolutePath);
 
-                // Remove the plugin's directory if it is empty now
                 auto directory = Path::GetDirectory(absolutePath);
-                if (Path::DirectoryExists(directory)
-                    && Path::ScanDirectory(Path::Combine(directory, u8"*"), true)->Next() == false)
+                if (std::find(directories.begin(), directories.end(), directory) == directories.end())
                 {
-                    Path::DeleteDirectory(directory);
+                    directories.push_back(std::move(directory));
+                }
+            }
+
+            // Remove the plugin's now-empty directories. is_empty is used directly
+            // because the engine's wildcard matcher does not support a bare "*".
+            for (const auto& directory : directories)
+            {
+                std::error_code ec;
+                auto fsPath = fs::u8path(directory);
+                if (fs::is_empty(fsPath, ec) && !ec)
+                {
+                    fs::remove(fsPath, ec);
                 }
             }
         }
