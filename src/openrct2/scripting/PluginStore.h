@@ -37,6 +37,10 @@ namespace OpenRCT2::Scripting::PluginStore
         // GitHub repository ("owner/repo") to install release assets from.
         std::string repository;
         int32_t stars{};
+        // ISO 8601 last-updated timestamp ("pushed_at" from GitHub, or "updated" from
+        // a custom source). Lexicographic order matches chronological order, so it can
+        // be sorted directly. May be empty for sources that don't provide it.
+        std::string updatedAt;
     };
 
     struct InstallResult

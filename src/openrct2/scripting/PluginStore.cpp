@@ -219,6 +219,7 @@ namespace OpenRCT2::Scripting::PluginStore
             entry.description = GetJsonString(item, "description");
             entry.websiteUrl = GetJsonString(item, "html_url");
             entry.stars = GetJsonNumber<int32_t>(item, "stargazers_count");
+            entry.updatedAt = GetJsonString(item, "pushed_at");
             auto owner = item.find("owner");
             if (owner != item.end() && owner->is_object())
             {
@@ -251,6 +252,7 @@ namespace OpenRCT2::Scripting::PluginStore
             entry.description = GetJsonString(item, "description");
             entry.version = GetJsonString(item, "version");
             entry.websiteUrl = GetJsonString(item, "website");
+            entry.updatedAt = GetJsonString(item, "updated");
             auto author = item.find("author");
             if (author != item.end())
             {

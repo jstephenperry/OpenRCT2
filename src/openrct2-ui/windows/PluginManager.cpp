@@ -12,8 +12,11 @@
     #include "../UiStringIds.h"
 
     #include <algorithm>
+    #include <array>
+    #include <cctype>
     #include <chrono>
     #include <future>
+    #include <openrct2-ui/interface/Dropdown.h>
     #include <openrct2-ui/interface/Widget.h>
     #include <openrct2-ui/windows/Windows.h>
     #include <openrct2/Context.h>
@@ -69,19 +72,32 @@ namespace OpenRCT2::Ui::Windows
         WIDX_TAB_SOURCES,
         WIDX_LIST,
 
+        WIDX_PAGE_WIDGETS_START,
+
         // Installed page
-        WIDX_OPEN_FOLDER,
+        WIDX_OPEN_FOLDER = WIDX_PAGE_WIDGETS_START,
         WIDX_UNINSTALL,
 
         // Available page
-        WIDX_REFRESH = WIDX_OPEN_FOLDER,
+        WIDX_SEARCH = WIDX_PAGE_WIDGETS_START,
+        WIDX_SORT,
+        WIDX_SORT_BUTTON,
+        WIDX_REFRESH,
         WIDX_INSTALL,
         WIDX_OPEN_WEBPAGE,
 
         // Sources page
-        WIDX_ADD_SOURCE = WIDX_OPEN_FOLDER,
+        WIDX_ADD_SOURCE = WIDX_PAGE_WIDGETS_START,
         WIDX_REMOVE_SOURCE,
     };
+
+    enum class AvailableSort : int32_t
+    {
+        stars,
+        recent,
+        name,
+    };
+    static constexpr int32_t kSortModeCount = 3;
 
     // clang-format off
     static constexpr auto kMainWidgets = makeWidgets(
@@ -101,9 +117,11 @@ namespace OpenRCT2::Ui::Windows
 
     static constexpr auto kAvailablePageWidgets = makeWidgets(
         kMainWidgets,
-        makeWidget({  6, 262 }, { 130, 14 }, WidgetType::button, WindowColour::secondary, STR_PLUGIN_MANAGER_REFRESH),
-        makeWidget({140, 262 }, { 130, 14 }, WidgetType::button, WindowColour::secondary, STR_PLUGIN_MANAGER_INSTALL),
-        makeWidget({274, 262 }, { 130, 14 }, WidgetType::button, WindowColour::secondary, STR_PLUGIN_MANAGER_OPEN_WEBPAGE)
+        makeWidget        ({  6, kTabHeight + 6 }, { 300, 14 }, WidgetType::textBox,      WindowColour::secondary                                ), // search box
+        makeDropdownWidgets({310, kTabHeight + 6 }, { 178, 14 }, WidgetType::dropdownMenu, WindowColour::secondary, STR_PLUGIN_MANAGER_SORT_STARS), // sort box + arrow (2 widgets)
+        makeWidget        ({  6, 262 },            { 130, 14 }, WidgetType::button,       WindowColour::secondary, STR_PLUGIN_MANAGER_REFRESH    ),
+        makeWidget        ({140, 262 },            { 130, 14 }, WidgetType::button,       WindowColour::secondary, STR_PLUGIN_MANAGER_INSTALL    ),
+        makeWidget        ({274, 262 },            { 130, 14 }, WidgetType::button,       WindowColour::secondary, STR_PLUGIN_MANAGER_OPEN_WEBPAGE)
     );
 
     static constexpr auto kSourcesPageWidgets = makeWidgets(
@@ -125,6 +143,12 @@ namespace OpenRCT2::Ui::Windows
         STR_PLUGIN_MANAGER_TAB_SOURCES,
     };
 
+    static constexpr StringId kSortLabels[kSortModeCount] = {
+        STR_PLUGIN_MANAGER_SORT_STARS,
+        STR_PLUGIN_MANAGER_SORT_RECENT,
+        STR_PLUGIN_MANAGER_SORT_NAME,
+    };
+
     class PluginManagerWindow final : public Window
     {
     private:
@@ -138,8 +162,15 @@ namespace OpenRCT2::Ui::Windows
 
         std::vector<InstalledItem> _installed;
         std::vector<PluginStore::Entry> _available;
+        // Indices into _available, holding the current search-filtered + sorted order
+        // that the Available list actually displays.
+        std::vector<size_t> _availableView;
         std::set<std::string> _installedStoreIds;
         std::vector<std::string> _customSources;
+
+        std::string _searchText;
+        AvailableSort _sortMode = AvailableSort::stars;
+        static constexpr int32_t kMaxSearchLength = 64;
 
         std::future<std::pair<std::vector<PluginStore::Entry>, std::string>> _fetchFuture;
         std::future<PluginStore::InstallResult> _installFuture;
@@ -203,22 +234,64 @@ namespace OpenRCT2::Ui::Windows
 
         void onUpdate() override
         {
+            if (GetCurrentTextBox().window.classification == classification && GetCurrentTextBox().window.number == number)
+            {
+                WindowUpdateTextboxCaret();
+                invalidateWidget(WIDX_SEARCH);
+            }
             checkFetchComplete();
             checkInstallComplete();
         }
 
         void onTextInput(WidgetIndex widgetIndex, std::string_view text) override
         {
-            if (page != PAGE_SOURCES || widgetIndex != WIDX_ADD_SOURCE || text.empty())
-                return;
-
-            auto url = String::trim(std::string(text));
-            if (String::startsWith(url, "http://", true) || String::startsWith(url, "https://", true))
+            if (page == PAGE_AVAILABLE && widgetIndex == WIDX_SEARCH)
             {
-                PluginStore::AddCustomSource(url);
-                refreshSources();
+                // Live client-side filter over the already-fetched list
+                _searchText = std::string(text);
+                rebuildAvailableView();
+                _selectedItem = -1;
                 invalidate();
             }
+            else if (page == PAGE_SOURCES && widgetIndex == WIDX_ADD_SOURCE && !text.empty())
+            {
+                auto url = String::trim(std::string(text));
+                if (String::startsWith(url, "http://", true) || String::startsWith(url, "https://", true))
+                {
+                    PluginStore::AddCustomSource(url);
+                    refreshSources();
+                    invalidate();
+                }
+            }
+        }
+
+        void onMouseDown(WidgetIndex widgetIndex) override
+        {
+            if (page != PAGE_AVAILABLE || (widgetIndex != WIDX_SORT && widgetIndex != WIDX_SORT_BUTTON))
+                return;
+
+            const auto& widget = widgets[WIDX_SORT];
+            std::array<Dropdown::Item, kSortModeCount> items = {
+                Dropdown::PlainMenuLabel(STR_PLUGIN_MANAGER_SORT_STARS),
+                Dropdown::PlainMenuLabel(STR_PLUGIN_MANAGER_SORT_RECENT),
+                Dropdown::PlainMenuLabel(STR_PLUGIN_MANAGER_SORT_NAME),
+            };
+            WindowDropdownShowText(
+                { windowPos.x + widget.left, windowPos.y + widget.top }, widget.height(), colours[1], 0, items);
+            gDropdown.items[static_cast<int32_t>(_sortMode)].setChecked(true);
+        }
+
+        void onDropdown(WidgetIndex widgetIndex, int32_t selectedIndex) override
+        {
+            if (page != PAGE_AVAILABLE || (widgetIndex != WIDX_SORT && widgetIndex != WIDX_SORT_BUTTON))
+                return;
+            if (selectedIndex < 0 || selectedIndex >= kSortModeCount)
+                return;
+
+            _sortMode = static_cast<AvailableSort>(selectedIndex);
+            sortAvailableView();
+            _selectedItem = -1;
+            invalidate();
         }
 
         ScreenSize onScrollGetSize(int32_t scrollIndex) override
@@ -268,19 +341,43 @@ namespace OpenRCT2::Ui::Windows
                 }
                 case PAGE_AVAILABLE:
                 {
+                    constexpr int32_t rowHeight = 14;
+                    constexpr int32_t sortWidth = 150;
+                    int32_t rowTop = kTabHeight + margin;
+
+                    // Search box (left) and sort dropdown (right), in a row above the list
+                    widgets[WIDX_SEARCH].left = margin;
+                    widgets[WIDX_SEARCH].right = width - margin - sortWidth - 4;
+                    widgets[WIDX_SEARCH].top = rowTop;
+                    widgets[WIDX_SEARCH].bottom = rowTop + rowHeight - 1;
+                    widgets[WIDX_SEARCH].string = const_cast<utf8*>(_searchText.c_str());
+
+                    widgets[WIDX_SORT].left = width - margin - sortWidth;
+                    widgets[WIDX_SORT].right = width - margin;
+                    widgets[WIDX_SORT].top = rowTop;
+                    widgets[WIDX_SORT].bottom = rowTop + rowHeight - 1;
+                    widgets[WIDX_SORT].text = kSortLabels[static_cast<int32_t>(_sortMode)];
+                    widgets[WIDX_SORT_BUTTON].left = widgets[WIDX_SORT].right - 11;
+                    widgets[WIDX_SORT_BUTTON].right = widgets[WIDX_SORT].right - 1;
+                    widgets[WIDX_SORT_BUTTON].top = rowTop + 1;
+                    widgets[WIDX_SORT_BUTTON].bottom = rowTop + rowHeight - 2;
+
+                    // Push the list below the search row
+                    widgets[WIDX_LIST].top = rowTop + rowHeight + margin;
+
                     auto x = layoutButton(WIDX_REFRESH, margin, 130);
                     x = layoutButton(WIDX_INSTALL, x, 130);
                     layoutButton(WIDX_OPEN_WEBPAGE, x, 130);
 
-                    auto hasSelection = isValidSelection();
+                    auto* selected = selectedAvailableEntry();
                     auto installing = _installFuture.valid();
                     widgetSetDisabled(*this, WIDX_REFRESH, _fetchFuture.valid() || installing);
-                    widgetSetDisabled(*this, WIDX_INSTALL, !hasSelection || installing);
-                    widgetSetDisabled(*this, WIDX_OPEN_WEBPAGE, !hasSelection);
-                    widgets[WIDX_INSTALL].text = hasSelection && isStoreInstalled(_available[_selectedItem].id)
+                    widgetSetDisabled(*this, WIDX_INSTALL, selected == nullptr || installing);
+                    widgetSetDisabled(*this, WIDX_OPEN_WEBPAGE, selected == nullptr);
+                    widgets[WIDX_INSTALL].text = (selected != nullptr && isStoreInstalled(selected->id))
                         ? STR_PLUGIN_MANAGER_REINSTALL
                         : STR_PLUGIN_MANAGER_INSTALL;
-                    numListItems = static_cast<uint16_t>(_available.size());
+                    numListItems = static_cast<uint16_t>(_availableView.size());
                     break;
                 }
                 case PAGE_SOURCES:
@@ -300,6 +397,7 @@ namespace OpenRCT2::Ui::Windows
             drawWidgets(rt);
             drawTabNames(rt);
             drawStatusText(rt);
+            drawSearchPrompt(rt);
         }
 
         void onScrollDraw(int32_t scrollIndex, RenderTarget& rt) override
@@ -358,7 +456,7 @@ namespace OpenRCT2::Ui::Windows
                 case PAGE_INSTALLED:
                     return _installed.size();
                 case PAGE_AVAILABLE:
-                    return _available.size();
+                    return _availableView.size();
                 case PAGE_SOURCES:
                     return 1 + _customSources.size();
                 default:
@@ -369,6 +467,17 @@ namespace OpenRCT2::Ui::Windows
         bool isValidSelection() const
         {
             return _selectedItem >= 0 && static_cast<size_t>(_selectedItem) < currentListSize();
+        }
+
+        // The Available list shows _availableView (filtered + sorted indices), so a
+        // selected row maps through it to the underlying _available entry.
+        const PluginStore::Entry* selectedAvailableEntry() const
+        {
+            if (_selectedItem >= 0 && static_cast<size_t>(_selectedItem) < _availableView.size())
+            {
+                return &_available[_availableView[_selectedItem]];
+            }
+            return nullptr;
         }
 
         bool isStoreInstalled(const std::string& id) const
@@ -416,6 +525,62 @@ namespace OpenRCT2::Ui::Windows
             _customSources = PluginStore::GetCustomSources();
         }
 
+        static std::string toLower(std::string_view value)
+        {
+            std::string result(value);
+            std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            return result;
+        }
+
+        static bool containsIgnoreCase(std::string_view haystack, const std::string& lowerNeedle)
+        {
+            return lowerNeedle.empty() || toLower(haystack).find(lowerNeedle) != std::string::npos;
+        }
+
+        // Rebuilds the filtered + sorted view of _available from the current search text.
+        void rebuildAvailableView()
+        {
+            auto needle = toLower(_searchText);
+            _availableView.clear();
+            _availableView.reserve(_available.size());
+            for (size_t i = 0; i < _available.size(); i++)
+            {
+                const auto& e = _available[i];
+                if (containsIgnoreCase(e.name, needle) || containsIgnoreCase(e.author, needle)
+                    || containsIgnoreCase(e.description, needle))
+                {
+                    _availableView.push_back(i);
+                }
+            }
+            sortAvailableView();
+        }
+
+        void sortAvailableView()
+        {
+            std::stable_sort(_availableView.begin(), _availableView.end(), [this](size_t a, size_t b) {
+                const auto& ea = _available[a];
+                const auto& eb = _available[b];
+                switch (_sortMode)
+                {
+                    case AvailableSort::recent:
+                        // ISO 8601 timestamps sort chronologically; newest (greatest) first,
+                        // entries with no date (custom sources) fall to the end.
+                        if (ea.updatedAt != eb.updatedAt)
+                            return ea.updatedAt > eb.updatedAt;
+                        return ea.stars > eb.stars;
+                    case AvailableSort::name:
+                        return String::compare(ea.name, eb.name, true) < 0;
+                    case AvailableSort::stars:
+                    default:
+                        if (ea.stars != eb.stars)
+                            return ea.stars > eb.stars;
+                        return String::compare(ea.name, eb.name, true) < 0;
+                }
+            });
+        }
+
         void onInstalledPageMouseUp(WidgetIndex widgetIndex)
         {
             switch (widgetIndex)
@@ -456,6 +621,9 @@ namespace OpenRCT2::Ui::Windows
         {
             switch (widgetIndex)
             {
+                case WIDX_SEARCH:
+                    WindowStartTextbox(*this, widgetIndex, _searchText, kMaxSearchLength);
+                    break;
                 case WIDX_REFRESH:
                     fetchAvailableBegin();
                     break;
@@ -464,11 +632,11 @@ namespace OpenRCT2::Ui::Windows
                     break;
                 case WIDX_OPEN_WEBPAGE:
                 {
-                    if (!isValidSelection())
+                    auto* entry = selectedAvailableEntry();
+                    if (entry == nullptr)
                         break;
 
-                    const auto& entry = _available[_selectedItem];
-                    const auto& url = entry.websiteUrl.empty() ? entry.downloadUrl : entry.websiteUrl;
+                    const auto& url = entry->websiteUrl.empty() ? entry->downloadUrl : entry->websiteUrl;
                     if (!url.empty())
                     {
                         GetContext()->GetUiContext().OpenURL(url);
@@ -534,6 +702,7 @@ namespace OpenRCT2::Ui::Windows
             if (error.empty())
             {
                 _available = std::move(entries);
+                rebuildAvailableView();
                 _availableStatus = STR_PLUGIN_MANAGER_X_AVAILABLE;
             }
             else
@@ -547,10 +716,11 @@ namespace OpenRCT2::Ui::Windows
 
         void installBegin()
         {
-            if (_installFuture.valid() || !isValidSelection())
+            auto* selected = selectedAvailableEntry();
+            if (_installFuture.valid() || selected == nullptr)
                 return;
 
-            auto entry = _available[_selectedItem];
+            auto entry = *selected;
             _statusDetail = entry.name;
             _availableStatus = STR_PLUGIN_MANAGER_INSTALLING;
             _installFuture = std::async(std::launch::async, [entry] { return PluginStore::InstallPlugin(entry); });
@@ -614,7 +784,7 @@ namespace OpenRCT2::Ui::Windows
                 case PAGE_AVAILABLE:
                     if (_availableStatus == STR_PLUGIN_MANAGER_X_AVAILABLE)
                     {
-                        ft.Add<uint16_t>(static_cast<uint16_t>(_available.size()));
+                        ft.Add<uint16_t>(static_cast<uint16_t>(_availableView.size()));
                     }
                     else
                     {
@@ -628,6 +798,23 @@ namespace OpenRCT2::Ui::Windows
                 case PAGE_SOURCES:
                     break;
             }
+        }
+
+        // Hint text shown inside the empty search box when it is not being edited.
+        void drawSearchPrompt(RenderTarget& rt)
+        {
+            if (page != PAGE_AVAILABLE || !_searchText.empty())
+                return;
+
+            bool editing = GetCurrentTextBox().window.classification == classification
+                && GetCurrentTextBox().window.number == number;
+            if (editing)
+                return;
+
+            const auto& widget = widgets[WIDX_SEARCH];
+            drawTextEllipsised(
+                rt, windowPos + ScreenCoordsXY{ widget.left + 4, widget.top + 2 }, widget.width() - 8,
+                STR_PLUGIN_MANAGER_SEARCH_PROMPT, { colours[1], TextAlignment::left });
         }
 
         void drawHighlightIfSelected(RenderTarget& rt, int32_t itemIndex, int32_t listWidth, int32_t y)
@@ -671,7 +858,7 @@ namespace OpenRCT2::Ui::Windows
             int32_t authorWidth = listWidth / 5;
 
             int32_t y = 0;
-            for (size_t i = 0; i < _available.size(); i++, y += kItemHeight)
+            for (size_t i = 0; i < _availableView.size(); i++, y += kItemHeight)
             {
                 if (y + kItemHeight < rt.y || y >= rt.y + rt.height)
                     continue;
@@ -679,7 +866,7 @@ namespace OpenRCT2::Ui::Windows
                 auto itemIndex = static_cast<int32_t>(i);
                 drawHighlightIfSelected(rt, itemIndex, listWidth, y);
 
-                const auto& entry = _available[i];
+                const auto& entry = _available[_availableView[i]];
 
                 int32_t right = listWidth - kScrollBarWidth - 4;
                 if (isStoreInstalled(entry.id))
