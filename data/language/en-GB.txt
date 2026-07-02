@@ -3849,8 +3849,10 @@ STR_7049    :Unable to fetch plugin list: {STRING}
 STR_7050    :Installing: {STRING}
 STR_7051    :Installed: {STRING}
 STR_7052    :Unable to install plugin
-STR_7053    :Official plugin index (GitHub topic: openrct2-plugin)
+STR_7053    :Community plugin index, unverified (GitHub topic: openrct2-plugin)
 STR_7054    :Most stars
 STR_7055    :Most recent
 STR_7056    :Name (A-Z)
 STR_7057    :Search plugins...
+STR_7058    :Confirm install
+STR_7059    :Runs unverified code - click Install again to confirm

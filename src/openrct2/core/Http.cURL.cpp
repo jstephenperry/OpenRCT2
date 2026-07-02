@@ -29,11 +29,23 @@
 
 namespace OpenRCT2::Http
 {
+    struct WriteContext
+    {
+        Response* res;
+        size_t maxSize;
+    };
+
     static size_t WriteData(const char* src, size_t size, size_t nmemb, void* userdata)
     {
         size_t realsize = size * nmemb;
-        Response* res = static_cast<Response*>(userdata);
-        res->body += std::string(src, src + realsize);
+        auto* ctx = static_cast<WriteContext*>(userdata);
+        if (ctx->maxSize != 0 && ctx->res->body.size() + realsize > ctx->maxSize)
+        {
+            // Returning a short count aborts the transfer with CURLE_WRITE_ERROR,
+            // bounding memory use against an oversized (or endless) response body.
+            return 0;
+        }
+        ctx->res->body.append(src, realsize);
 
         return realsize;
     }
@@ -114,15 +126,38 @@ namespace OpenRCT2::Http
             if (req.method == Method::PUT)
                 curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
 
+            WriteContext writeCtx{ &res, req.maxSize };
+
             curl_easy_setopt(curl, CURLOPT_URL, req.url.c_str());
             curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, true);
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteData);
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, static_cast<void*>(&res));
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, static_cast<void*>(&writeCtx));
             curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, HeaderCallback);
             curl_easy_setopt(curl, CURLOPT_HEADERDATA, static_cast<void*>(&res));
-            curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, true);
             curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, true);
+            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
             curl_easy_setopt(curl, CURLOPT_USERAGENT, kOpenRCT2UserAgent);
+
+            // Restrict to HTTP(S) for both the initial request and any redirect target,
+            // so an attacker-controlled URL cannot smuggle file://, gopher://, etc.
+    #if LIBCURL_VERSION_NUM >= 0x075500 // 7.85.0 introduced the string form
+            curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+            curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+    #else
+            curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+            curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+    #endif
+            curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
+
+            if (req.maxSize != 0)
+                curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE, static_cast<curl_off_t>(req.maxSize));
+
+            if (req.timeoutSeconds != 0)
+            {
+                curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(req.timeoutSeconds));
+                auto connectTimeout = req.timeoutSeconds < 30 ? req.timeoutSeconds : 30;
+                curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, static_cast<long>(connectTimeout));
+            }
 
             curl_slist* chunk = nullptr;
             std::shared_ptr<void> __(nullptr, [chunk](...) { curl_slist_free_all(chunk); });

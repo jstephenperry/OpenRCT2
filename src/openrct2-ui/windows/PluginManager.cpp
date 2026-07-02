@@ -172,6 +172,10 @@ namespace OpenRCT2::Ui::Windows
         AvailableSort _sortMode = AvailableSort::stars;
         static constexpr int32_t kMaxSearchLength = 64;
 
+        // Id of the entry awaiting a second Install click to confirm running unverified
+        // code. Cleared whenever the selection or list changes.
+        std::string _installConfirmId;
+
         std::future<std::pair<std::vector<PluginStore::Entry>, std::string>> _fetchFuture;
         std::future<PluginStore::InstallResult> _installFuture;
         bool _hasFetched = false;
@@ -251,16 +255,23 @@ namespace OpenRCT2::Ui::Windows
                 _searchText = std::string(text);
                 rebuildAvailableView();
                 _selectedItem = -1;
+                _installConfirmId.clear();
                 invalidate();
             }
             else if (page == PAGE_SOURCES && widgetIndex == WIDX_ADD_SOURCE && !text.empty())
             {
                 auto url = String::trim(std::string(text));
-                if (String::startsWith(url, "http://", true) || String::startsWith(url, "https://", true))
+                // Require HTTPS: plugin code is downloaded and executed, so a plaintext
+                // source would let a network MITM substitute malicious code.
+                if (String::startsWith(url, "https://", true))
                 {
                     PluginStore::AddCustomSource(url);
                     refreshSources();
                     invalidate();
+                }
+                else
+                {
+                    ContextShowError(STR_PLUGIN_MANAGER_ADD_SOURCE, STR_PLUGIN_MANAGER_ENTER_SOURCE_URL, {});
                 }
             }
         }
@@ -291,6 +302,7 @@ namespace OpenRCT2::Ui::Windows
             _sortMode = static_cast<AvailableSort>(selectedIndex);
             sortAvailableView();
             _selectedItem = -1;
+            _installConfirmId.clear();
             invalidate();
         }
 
@@ -303,6 +315,7 @@ namespace OpenRCT2::Ui::Windows
         {
             auto itemIndex = screenCoords.y / kItemHeight;
             _selectedItem = (itemIndex >= 0 && static_cast<size_t>(itemIndex) < currentListSize()) ? itemIndex : -1;
+            _installConfirmId.clear();
             invalidate();
         }
 
@@ -374,9 +387,16 @@ namespace OpenRCT2::Ui::Windows
                     widgetSetDisabled(*this, WIDX_REFRESH, _fetchFuture.valid() || installing);
                     widgetSetDisabled(*this, WIDX_INSTALL, selected == nullptr || installing);
                     widgetSetDisabled(*this, WIDX_OPEN_WEBPAGE, selected == nullptr);
-                    widgets[WIDX_INSTALL].text = (selected != nullptr && isStoreInstalled(selected->id))
-                        ? STR_PLUGIN_MANAGER_REINSTALL
-                        : STR_PLUGIN_MANAGER_INSTALL;
+                    if (selected != nullptr && _installConfirmId == selected->id)
+                    {
+                        widgets[WIDX_INSTALL].text = STR_PLUGIN_MANAGER_CONFIRM_INSTALL;
+                    }
+                    else
+                    {
+                        widgets[WIDX_INSTALL].text = (selected != nullptr && isStoreInstalled(selected->id))
+                            ? STR_PLUGIN_MANAGER_REINSTALL
+                            : STR_PLUGIN_MANAGER_INSTALL;
+                    }
                     numListItems = static_cast<uint16_t>(_availableView.size());
                     break;
                 }
@@ -430,6 +450,7 @@ namespace OpenRCT2::Ui::Windows
 
             page = newPage;
             _selectedItem = -1;
+            _installConfirmId.clear();
 
             setWidgets(kPageWidgets[newPage]);
     #ifdef DISABLE_HTTP
@@ -628,8 +649,24 @@ namespace OpenRCT2::Ui::Windows
                     fetchAvailableBegin();
                     break;
                 case WIDX_INSTALL:
-                    installBegin();
+                {
+                    auto* entry = selectedAvailableEntry();
+                    if (entry == nullptr)
+                        break;
+                    // First click arms a confirmation (the button relabels and a warning
+                    // shows); the second click actually downloads and runs the code.
+                    if (_installConfirmId != entry->id)
+                    {
+                        _installConfirmId = entry->id;
+                        invalidate();
+                    }
+                    else
+                    {
+                        _installConfirmId.clear();
+                        installBegin();
+                    }
                     break;
+                }
                 case WIDX_OPEN_WEBPAGE:
                 {
                     auto* entry = selectedAvailableEntry();
@@ -711,6 +748,7 @@ namespace OpenRCT2::Ui::Windows
                 _availableStatus = STR_PLUGIN_MANAGER_FETCH_FAILED;
             }
             _selectedItem = -1;
+            _installConfirmId.clear();
             invalidate();
         }
 
@@ -782,6 +820,14 @@ namespace OpenRCT2::Ui::Windows
                     drawText(rt, coords, STR_PLUGIN_MANAGER_X_INSTALLED, ft, { colours[1] });
                     break;
                 case PAGE_AVAILABLE:
+                {
+                    // While an install is armed, warn that the code is unverified.
+                    auto* selected = selectedAvailableEntry();
+                    if (selected != nullptr && _installConfirmId == selected->id)
+                    {
+                        drawText(rt, coords, STR_PLUGIN_MANAGER_UNVERIFIED_WARNING, { Drawing::Colour::brightRed });
+                        break;
+                    }
                     if (_availableStatus == STR_PLUGIN_MANAGER_X_AVAILABLE)
                     {
                         ft.Add<uint16_t>(static_cast<uint16_t>(_availableView.size()));
@@ -795,6 +841,7 @@ namespace OpenRCT2::Ui::Windows
                         drawText(rt, coords, _availableStatus, ft, { colours[1] });
                     }
                     break;
+                }
                 case PAGE_SOURCES:
                     break;
             }
@@ -842,11 +889,16 @@ namespace OpenRCT2::Ui::Windows
 
                 const auto& item = _installed[i];
                 int32_t x = 3;
-                drawTextEllipsised(rt, { x, y + 3 }, nameWidth - 5, item.name, { colours[1] });
+                // Plugin metadata is attacker-controllable (from remote plugins), so draw
+                // it without format-code processing to prevent UI-spoofing / arg reads.
+                drawTextEllipsised(rt, { x, y + 3 }, nameWidth - 5, item.name, { colours[1], { TextPaintFlag::noFormatting } });
                 x += nameWidth;
-                drawTextEllipsised(rt, { x, y + 3 }, versionWidth - 5, item.version, { colours[1] });
+                drawTextEllipsised(
+                    rt, { x, y + 3 }, versionWidth - 5, item.version, { colours[1], { TextPaintFlag::noFormatting } });
                 x += versionWidth;
-                drawTextEllipsised(rt, { x, y + 3 }, listWidth - x - kScrollBarWidth - 4, item.authors, { colours[1] });
+                drawTextEllipsised(
+                    rt, { x, y + 3 }, listWidth - x - kScrollBarWidth - 4, item.authors,
+                    { colours[1], { TextPaintFlag::noFormatting } });
             }
         }
 
@@ -877,11 +929,13 @@ namespace OpenRCT2::Ui::Windows
                 right -= markerWidth + 4;
 
                 int32_t authorLeft = right - authorWidth;
-                drawTextEllipsised(rt, { authorLeft, y + 3 }, authorWidth, entry.author, { colours[1] });
+                // Remote-controlled strings: draw without format-code processing.
+                drawTextEllipsised(
+                    rt, { authorLeft, y + 3 }, authorWidth, entry.author, { colours[1], { TextPaintFlag::noFormatting } });
 
                 // Show the description instead of the name while the row is selected
                 const auto& text = (itemIndex == _selectedItem && !entry.description.empty()) ? entry.description : entry.name;
-                drawTextEllipsised(rt, { 3, y + 3 }, authorLeft - 8, text, { colours[1] });
+                drawTextEllipsised(rt, { 3, y + 3 }, authorLeft - 8, text, { colours[1], { TextPaintFlag::noFormatting } });
             }
         }
 
@@ -901,7 +955,8 @@ namespace OpenRCT2::Ui::Windows
                     continue;
 
                 drawHighlightIfSelected(rt, static_cast<int32_t>(i + 1), listWidth, y);
-                drawTextEllipsised(rt, { 3, y + 3 }, textWidth, _customSources[i], { colours[1] });
+                drawTextEllipsised(
+                    rt, { 3, y + 3 }, textWidth, _customSources[i], { colours[1], { TextPaintFlag::noFormatting } });
             }
         }
     };

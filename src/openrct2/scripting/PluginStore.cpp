@@ -34,6 +34,13 @@ namespace OpenRCT2::Scripting::PluginStore
     static constexpr const char* kGitHubIndexUrl = "https://api.github.com/search/"
                                                    "repositories?q=topic%3Aopenrct2-plugin&sort=stars&order=desc&per_page=100";
 
+    // Downloaded plugin code is executed, so bound what we fetch from untrusted sources.
+    static constexpr size_t kMaxJsonResponseBytes = 16 * 1024 * 1024;
+    static constexpr size_t kMaxDownloadBytes = 32 * 1024 * 1024;
+    static constexpr int32_t kHttpTimeoutSeconds = 30;
+    // Reject pathologically nested JSON before handing it to the recursive parser.
+    static constexpr int32_t kMaxJsonDepth = 100;
+
     // Guards reads and writes of the manifest file, which can happen from both the
     // UI thread and download worker threads.
     static std::mutex _manifestMutex;
@@ -123,6 +130,23 @@ namespace OpenRCT2::Scripting::PluginStore
         return result;
     }
 
+    // Returns true only if 'candidate' resolves to a location strictly inside 'base'
+    // (not base itself, not an escape via ".."). Used to contain manifest-driven deletes.
+    static bool IsStrictlyWithin(std::string_view base, std::string_view candidate)
+    {
+        auto b = fs::u8path(base).lexically_normal();
+        auto c = fs::u8path(candidate).lexically_normal();
+        auto rel = c.lexically_relative(b);
+        if (rel.empty())
+            return false;
+        auto it = rel.begin();
+        if (*it == fs::u8path(".."))
+            return false; // escapes base
+        if (*it == fs::u8path(".") && std::next(it) == rel.end())
+            return false; // equals base
+        return true;
+    }
+
     std::vector<std::string> GetCustomSources()
     {
         std::vector<std::string> result;
@@ -182,17 +206,65 @@ namespace OpenRCT2::Scripting::PluginStore
 
     #ifndef DISABLE_HTTP
 
+    // Plugin code is downloaded and executed, so require an authenticated, encrypted
+    // transport end to end. Rejects http:// and any non-https scheme.
+    static void RequireHttps(const std::string& url)
+    {
+        if (!String::startsWith(url, "https://", true))
+        {
+            throw std::runtime_error("Refusing non-HTTPS plugin URL: " + url);
+        }
+    }
+
+    // Rejects JSON whose bracket nesting exceeds kMaxJsonDepth before it reaches the
+    // recursive-descent parser, preventing a stack-overflow crash from a hostile source.
+    static json_t ParseJsonChecked(const std::string& body)
+    {
+        int32_t depth = 0;
+        bool inString = false;
+        bool escaped = false;
+        for (char c : body)
+        {
+            if (inString)
+            {
+                if (escaped)
+                    escaped = false;
+                else if (c == '\\')
+                    escaped = true;
+                else if (c == '"')
+                    inString = false;
+                continue;
+            }
+            if (c == '"')
+                inString = true;
+            else if (c == '[' || c == '{')
+            {
+                if (++depth > kMaxJsonDepth)
+                    throw std::runtime_error("JSON nesting too deep");
+            }
+            else if (c == ']' || c == '}')
+            {
+                if (depth > 0)
+                    depth--;
+            }
+        }
+        return Json::FromString(body);
+    }
+
     static json_t FetchJson(const std::string& url)
     {
+        RequireHttps(url);
         Http::Request request;
         request.url = url;
         request.header["Accept"] = "application/vnd.github+json, application/json";
+        request.maxSize = kMaxJsonResponseBytes;
+        request.timeoutSeconds = kHttpTimeoutSeconds;
         auto response = Http::Do(request);
         if (response.status != Http::Status::Ok)
         {
             throw std::runtime_error("Server returned status " + std::to_string(static_cast<int32_t>(response.status)));
         }
-        return Json::FromString(response.body);
+        return ParseJsonChecked(response.body);
     }
 
     static void FetchGitHubIndex(std::vector<Entry>& outEntries)
@@ -302,8 +374,11 @@ namespace OpenRCT2::Scripting::PluginStore
 
     static std::string DownloadFile(const std::string& url)
     {
+        RequireHttps(url);
         Http::Request request;
         request.url = url;
+        request.maxSize = kMaxDownloadBytes;
+        request.timeoutSeconds = kHttpTimeoutSeconds;
         auto response = Http::Do(request);
         if (response.status != Http::Status::Ok)
         {
@@ -418,10 +493,15 @@ namespace OpenRCT2::Scripting::PluginStore
                         for (const auto& file : *previousFiles)
                         {
                             auto relativePath = Json::GetString(file);
-                            if (!relativePath.empty()
-                                && std::find(relativePaths.begin(), relativePaths.end(), relativePath) == relativePaths.end())
+                            if (relativePath.empty()
+                                || std::find(relativePaths.begin(), relativePaths.end(), relativePath) != relativePaths.end())
                             {
-                                File::Delete(Path::Combine(pluginDir, relativePath));
+                                continue;
+                            }
+                            auto absolutePath = Path::Combine(pluginDir, relativePath);
+                            if (IsStrictlyWithin(pluginDir, absolutePath))
+                            {
+                                File::Delete(absolutePath);
                             }
                         }
                     }
@@ -487,6 +567,13 @@ namespace OpenRCT2::Scripting::PluginStore
                     continue;
 
                 auto absolutePath = Path::Combine(pluginDir, relativePath);
+                // Defence in depth: never act on a manifest path that escapes the plugin
+                // directory (e.g. a tampered "../../.." entry).
+                if (!IsStrictlyWithin(pluginDir, absolutePath))
+                {
+                    LOG_WARNING("Skipping plugin-store path outside plugin directory: %s", absolutePath.c_str());
+                    continue;
+                }
                 File::Delete(absolutePath);
 
                 auto directory = Path::GetDirectory(absolutePath);
@@ -500,6 +587,9 @@ namespace OpenRCT2::Scripting::PluginStore
             // because the engine's wildcard matcher does not support a bare "*".
             for (const auto& directory : directories)
             {
+                if (!IsStrictlyWithin(pluginDir, directory))
+                    continue;
+
                 std::error_code ec;
                 auto fsPath = fs::u8path(directory);
                 if (fs::is_empty(fsPath, ec) && !ec)

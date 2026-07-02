@@ -49,6 +49,11 @@ namespace OpenRCT2::Http
         Method method = Method::GET;
         std::string body;
         bool forceIPv4{};
+        // Maximum response body size in bytes; 0 = unlimited. Transfers exceeding this
+        // are aborted. Used to bound downloads from untrusted sources.
+        size_t maxSize{};
+        // Overall transfer timeout in seconds; 0 = no explicit timeout.
+        int32_t timeoutSeconds{};
     };
 
     Response Do(const Request& req);
