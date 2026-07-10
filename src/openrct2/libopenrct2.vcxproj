@@ -675,6 +675,7 @@
     <ClInclude Include="scripting\HookEngine.h" />
     <ClInclude Include="scripting\IconNames.hpp" />
     <ClInclude Include="scripting\Plugin.h" />
+    <ClInclude Include="scripting\PluginStore.h" />
     <ClInclude Include="scripting\ScriptEngine.h" />
     <ClInclude Include="scripting\ScriptUtil.hpp" />
     <ClInclude Include="scripting\SoundNames.hpp" />
@@ -1252,6 +1253,7 @@
     <ClCompile Include="scripting\bindings\world\ScTileElement.cpp" />
     <ClCompile Include="scripting\HookEngine.cpp" />
     <ClCompile Include="scripting\Plugin.cpp" />
+    <ClCompile Include="scripting\PluginStore.cpp" />
     <ClCompile Include="scripting\ScriptEngine.cpp" />
     <ClCompile Include="TrackImporter.cpp" />
     <ClCompile Include="ui\DummyUiContext.cpp" />
