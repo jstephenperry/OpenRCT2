@@ -50,6 +50,24 @@ namespace OpenRCT2::Scripting::PluginStore
         std::string message;
     };
 
+    enum class Installability : uint8_t
+    {
+        installable,
+        notInstallable,
+        // Could not be determined (e.g. a network failure); the entry may well be
+        // installable, so callers should not present it as a hard negative.
+        unknown,
+    };
+
+    struct InstallabilityResult
+    {
+        Installability installability{ Installability::notInstallable };
+        // Version that would be installed when installable.
+        std::string version;
+        // Reason when not installable.
+        std::string message;
+    };
+
     /**
      * Returns the user-managed plugin source URLs from the config.
      */
@@ -69,6 +87,13 @@ namespace OpenRCT2::Scripting::PluginStore
      * Blocking, call from a worker thread.
      */
     InstallResult InstallPlugin(const Entry& entry);
+
+    /**
+     * Checks whether the entry has anything we can install: repository entries need a
+     * latest release with .js or .zip assets, custom-source entries a download URL.
+     * Blocking, call from a worker thread.
+     */
+    InstallabilityResult CheckInstallability(const Entry& entry);
 
     /**
      * Removes a plugin that was installed via the plugin store.

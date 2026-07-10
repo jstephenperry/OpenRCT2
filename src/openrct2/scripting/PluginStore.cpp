@@ -21,8 +21,11 @@
     #include "../core/Json.hpp"
     #include "../core/Path.hpp"
     #include "../core/String.hpp"
+    #include "../core/Zip.h"
 
+    #include <algorithm>
     #include <mutex>
+    #include <optional>
     #include <stdexcept>
     #include <system_error>
 
@@ -37,9 +40,49 @@ namespace OpenRCT2::Scripting::PluginStore
     // Downloaded plugin code is executed, so bound what we fetch from untrusted sources.
     static constexpr size_t kMaxJsonResponseBytes = 16 * 1024 * 1024;
     static constexpr size_t kMaxDownloadBytes = 32 * 1024 * 1024;
+    // Total bytes buffered in memory across a single install (downloaded assets plus
+    // everything extracted from zips). Caps peak memory against a release that ships
+    // many assets or a single highly compressed one.
+    static constexpr size_t kMaxInstallBytes = 64 * 1024 * 1024;
     static constexpr int32_t kHttpTimeoutSeconds = 30;
     // Reject pathologically nested JSON before handing it to the recursive parser.
     static constexpr int32_t kMaxJsonDepth = 100;
+
+    // Tracks how much of a single install's byte budget remains, throwing once a
+    // download or extraction would exceed it.
+    class SizeBudget
+    {
+        size_t _remaining;
+
+    public:
+        explicit SizeBudget(size_t total)
+            : _remaining(total)
+        {
+        }
+
+        size_t remaining() const
+        {
+            return _remaining;
+        }
+
+        void consume(size_t bytes)
+        {
+            if (bytes > _remaining)
+            {
+                throw std::runtime_error("Plugin install exceeded the maximum allowed size");
+            }
+            _remaining -= bytes;
+        }
+    };
+
+    // Thrown when an entry is definitively not installable (no release, no usable
+    // assets). Distinct from generic failures like a network error, which leave
+    // installability unknown rather than proving a negative.
+    class NotInstallableException : public std::runtime_error
+    {
+    public:
+        using std::runtime_error::runtime_error;
+    };
 
     // Guards reads and writes of the manifest file, which can happen from both the
     // UI thread and download worker threads.
@@ -251,7 +294,11 @@ namespace OpenRCT2::Scripting::PluginStore
         return Json::FromString(body);
     }
 
-    static json_t FetchJson(const std::string& url)
+    /**
+     * Like FetchJson, but returns std::nullopt when the server responds 404 so callers
+     * can fall back rather than fail.
+     */
+    static std::optional<json_t> FetchJsonIfFound(const std::string& url)
     {
         RequireHttps(url);
         Http::Request request;
@@ -260,11 +307,109 @@ namespace OpenRCT2::Scripting::PluginStore
         request.maxSize = kMaxJsonResponseBytes;
         request.timeoutSeconds = kHttpTimeoutSeconds;
         auto response = Http::Do(request);
+        if (response.status == Http::Status::NotFound)
+        {
+            return std::nullopt;
+        }
         if (response.status != Http::Status::Ok)
         {
             throw std::runtime_error("Server returned status " + std::to_string(static_cast<int32_t>(response.status)));
         }
         return ParseJsonChecked(response.body);
+    }
+
+    static json_t FetchJson(const std::string& url)
+    {
+        auto result = FetchJsonIfFound(url);
+        if (!result.has_value())
+        {
+            throw std::runtime_error(
+                "Server returned status " + std::to_string(static_cast<int32_t>(Http::Status::NotFound)));
+        }
+        return std::move(*result);
+    }
+
+    /**
+     * Returns the release to install from: the latest stable release when one exists,
+     * otherwise the most recent prerelease, otherwise std::nullopt. GitHub's
+     * releases/latest endpoint ignores prereleases entirely and responds 404 for
+     * repositories that only publish them.
+     */
+    static std::optional<json_t> FetchLatestRelease(const std::string& repository)
+    {
+        auto apiBase = "https://api.github.com/repos/" + repository;
+        auto latest = FetchJsonIfFound(apiBase + "/releases/latest");
+        if (latest.has_value())
+        {
+            return latest;
+        }
+        auto releases = FetchJsonIfFound(apiBase + "/releases?per_page=10");
+        if (releases.has_value() && releases->is_array())
+        {
+            // Newest first. Drafts are not visible to unauthenticated requests, but
+            // skip them defensively in case the request went through authenticated.
+            for (auto& release : *releases)
+            {
+                if (!release.is_object())
+                    continue;
+                auto draft = release.find("draft");
+                if (draft != release.end() && Json::GetBoolean(*draft))
+                    continue;
+                return std::move(release);
+            }
+        }
+        return std::nullopt;
+    }
+
+    /**
+     * Resolves .js files at the root of the repository's source tree into
+     * outDownloads, pinned to an immutable ref: the given tag, or the branch head
+     * commit when no ref is supplied. Pinning keeps the install reproducible — the
+     * downloaded code cannot change after the user confirmed it. Returns the
+     * installed version (the tag, or "git-" + the short commit hash).
+     */
+    static std::string GetGitHubTreeDownloads(
+        const std::string& repository, const std::string& tag, std::vector<std::pair<std::string, std::string>>& outDownloads)
+    {
+        auto apiBase = "https://api.github.com/repos/" + repository;
+        auto ref = tag;
+        auto version = tag;
+        if (ref.empty())
+        {
+            auto commits = FetchJsonIfFound(apiBase + "/commits?per_page=1");
+            if (!commits.has_value() || !commits->is_array() || commits->empty())
+            {
+                throw NotInstallableException("'" + repository + "' has no published releases or reachable commits");
+            }
+            auto sha = GetJsonString((*commits)[0], "sha");
+            if (sha.empty())
+            {
+                throw std::runtime_error("Unexpected response for commits of '" + repository + "'");
+            }
+            ref = sha;
+            version = "git-" + sha.substr(0, 7);
+        }
+
+        // ref is a tag from remote JSON (git tags may contain '#', '%', '+', ...) or a
+        // commit hash; encode it so it can't alter the query or inject path segments.
+        auto contents = FetchJsonIfFound(apiBase + "/contents/?ref=" + String::urlEncode(ref));
+        if (contents.has_value() && contents->is_array())
+        {
+            for (const auto& item : *contents)
+            {
+                if (!item.is_object() || GetJsonString(item, "type") != "file")
+                    continue;
+
+                auto name = GetJsonString(item, "name");
+                // With ?ref set, download_url points at the pinned raw file
+                auto downloadUrl = GetJsonString(item, "download_url");
+                if (!downloadUrl.empty() && String::endsWith(name, ".js", true))
+                {
+                    outDownloads.emplace_back(SanitiseFileName(name), downloadUrl);
+                }
+            }
+        }
+        return version;
     }
 
     static void FetchGitHubIndex(std::vector<Entry>& outEntries)
@@ -372,12 +517,19 @@ namespace OpenRCT2::Scripting::PluginStore
         return entries;
     }
 
-    static std::string DownloadFile(const std::string& url)
+    static std::string DownloadFile(const std::string& url, SizeBudget& budget)
     {
         RequireHttps(url);
+        // Never fetch more than the per-file limit, nor more than the install budget
+        // has left. A zero cap would read as "unlimited" downstream, so fail instead.
+        auto cap = std::min(kMaxDownloadBytes, budget.remaining());
+        if (cap == 0)
+        {
+            throw std::runtime_error("Plugin install exceeded the maximum allowed size");
+        }
         Http::Request request;
         request.url = url;
-        request.maxSize = kMaxDownloadBytes;
+        request.maxSize = cap;
         request.timeoutSeconds = kHttpTimeoutSeconds;
         auto response = Http::Do(request);
         if (response.status != Http::Status::Ok)
@@ -385,6 +537,7 @@ namespace OpenRCT2::Scripting::PluginStore
             throw std::runtime_error(
                 "Download of '" + url + "' returned status " + std::to_string(static_cast<int32_t>(response.status)));
         }
+        budget.consume(response.body.size());
         return std::move(response.body);
     }
 
@@ -405,35 +558,121 @@ namespace OpenRCT2::Scripting::PluginStore
     }
 
     /**
-     * Resolves the latest release of a GitHub repository to a list of downloadable
-     * .js assets. Returns the release tag.
+     * Extracts the .js files from a downloaded zip release asset. The zip API only
+     * reads from disk, so the body is staged to a temporary file in the store
+     * directory first.
+     */
+    static void ExtractJsFromZip(
+        const std::string& assetName, const std::string& zipBody, std::vector<std::pair<std::string, std::string>>& outFiles,
+        SizeBudget& budget)
+    {
+        auto storeDir = Path::Combine(GetPluginDirectory(), kStoreSubDirectory);
+        if (!Path::CreateDirectory(storeDir))
+        {
+            throw std::runtime_error("Unable to create directory '" + storeDir + "'");
+        }
+        auto tempPath = Path::Combine(storeDir, ".staged-" + SanitiseFileName(assetName) + ".tmp");
+        // Arm the cleanup before the write, so a failed/partial write is still removed
+        std::shared_ptr<void> __(nullptr, [&tempPath](...) { File::Delete(tempPath); });
+        File::WriteAllBytes(tempPath, zipBody.data(), zipBody.size());
+
+        auto zip = Zip::TryOpen(tempPath, ZipAccess::read);
+        if (zip == nullptr)
+        {
+            throw std::runtime_error("'" + assetName + "' is not a valid zip archive");
+        }
+
+        auto numFiles = zip->GetNumFiles();
+        for (size_t i = 0; i < numFiles; i++)
+        {
+            auto path = zip->GetFileName(i);
+            // Skip metadata directories added by macOS archivers
+            if (String::startsWith(path, "__MACOSX", true))
+                continue;
+
+            auto fileName = SanitiseFileName(Path::GetFileName(NormalisePathSeparators(path)));
+            if (!String::endsWith(fileName, ".js", true))
+                continue;
+
+            // Entries in different folders can flatten to the same name; first one wins
+            auto exists = std::any_of(
+                outFiles.begin(), outFiles.end(), [&fileName](const auto& f) { return f.first == fileName; });
+            if (exists)
+                continue;
+
+            // The declared uncompressed size drives GetFileData's allocation and
+            // inflation, and the central directory can lie (zip bombs). Refuse before
+            // any memory is committed if it would blow the budget, then account for the
+            // bytes actually produced as a backstop against an understated header.
+            if (zip->GetFileSize(i) > budget.remaining())
+            {
+                throw std::runtime_error("'" + assetName + "' decompresses beyond the maximum allowed size");
+            }
+            auto data = zip->GetFileData(path);
+            budget.consume(data.size());
+            outFiles.emplace_back(std::move(fileName), std::string(reinterpret_cast<const char*>(data.data()), data.size()));
+        }
+    }
+
+    /**
+     * Resolves what to download for a GitHub repository, preferring the most
+     * deliberate distribution the author published: loose .js release assets, then
+     * .zip release assets to extract, then .js files at the root of the source tree
+     * (at the release tag, or the head commit for repositories without releases).
+     * Returns the version that will be installed.
      */
     static std::string GetGitHubDownloads(
-        const std::string& repository, std::vector<std::pair<std::string, std::string>>& outDownloads)
+        const std::string& repository, std::vector<std::pair<std::string, std::string>>& outDownloads,
+        std::vector<std::pair<std::string, std::string>>& outZipDownloads)
     {
-        auto root = FetchJson("https://api.github.com/repos/" + repository + "/releases/latest");
-        auto tag = GetJsonString(root, "tag_name");
-        auto assets = root.find("assets");
-        if (assets != root.end() && assets->is_array())
+        std::string tag;
+        auto release = FetchLatestRelease(repository);
+        if (release.has_value())
         {
-            for (const auto& asset : *assets)
+            tag = GetJsonString(*release, "tag_name");
+            auto assets = release->find("assets");
+            if (assets != release->end() && assets->is_array())
             {
-                if (!asset.is_object())
-                    continue;
-
-                auto name = GetJsonString(asset, "name");
-                auto downloadUrl = GetJsonString(asset, "browser_download_url");
-                if (!downloadUrl.empty() && String::endsWith(name, ".js", true))
+                for (const auto& asset : *assets)
                 {
-                    outDownloads.emplace_back(SanitiseFileName(name), downloadUrl);
+                    if (!asset.is_object())
+                        continue;
+
+                    auto name = GetJsonString(asset, "name");
+                    auto downloadUrl = GetJsonString(asset, "browser_download_url");
+                    if (downloadUrl.empty())
+                        continue;
+                    if (String::endsWith(name, ".js", true))
+                    {
+                        outDownloads.emplace_back(SanitiseFileName(name), downloadUrl);
+                    }
+                    else if (String::endsWith(name, ".zip", true))
+                    {
+                        outZipDownloads.emplace_back(name, downloadUrl);
+                    }
                 }
             }
+            // Loose .js assets are the canonical form; only fall back to zips without them
+            if (!outDownloads.empty())
+            {
+                outZipDownloads.clear();
+            }
+            if (!outDownloads.empty() || !outZipDownloads.empty())
+            {
+                return tag;
+            }
         }
+
+        // No release, or a release without usable assets (e.g. tag-only releases):
+        // fall back to .js files at the root of the source tree, pinned to the
+        // release tag when there is one, or to the branch head commit otherwise.
+        auto version = GetGitHubTreeDownloads(repository, tag, outDownloads);
         if (outDownloads.empty())
         {
-            throw std::runtime_error("The latest release of '" + repository + "' does not contain any .js files");
+            throw NotInstallableException(
+                "'" + repository + "' does not ship any installable .js files in its latest release or repository root");
         }
-        return tag;
+        return version;
     }
 
     InstallResult InstallPlugin(const Entry& entry)
@@ -442,10 +681,11 @@ namespace OpenRCT2::Scripting::PluginStore
         try
         {
             std::vector<std::pair<std::string, std::string>> downloads;
+            std::vector<std::pair<std::string, std::string>> zipDownloads;
             auto version = entry.version;
             if (!entry.repository.empty())
             {
-                version = GetGitHubDownloads(entry.repository, downloads);
+                version = GetGitHubDownloads(entry.repository, downloads, zipDownloads);
             }
             else if (!entry.downloadUrl.empty())
             {
@@ -456,11 +696,21 @@ namespace OpenRCT2::Scripting::PluginStore
                 throw std::runtime_error("Plugin has no download location");
             }
 
-            // Download everything before touching the disk
+            // Download everything before touching the plugin directory
             std::vector<std::pair<std::string, std::string>> files;
+            SizeBudget budget(kMaxInstallBytes);
             for (const auto& [fileName, url] : downloads)
             {
-                files.emplace_back(fileName, DownloadFile(url));
+                files.emplace_back(fileName, DownloadFile(url, budget));
+            }
+            for (const auto& [assetName, url] : zipDownloads)
+            {
+                auto body = DownloadFile(url, budget);
+                ExtractJsFromZip(assetName, body, files, budget);
+            }
+            if (files.empty())
+            {
+                throw std::runtime_error("The downloaded release assets do not contain any .js files");
             }
 
             auto pluginDir = GetPluginDirectory();
@@ -526,6 +776,43 @@ namespace OpenRCT2::Scripting::PluginStore
         return result;
     }
 
+    InstallabilityResult CheckInstallability(const Entry& entry)
+    {
+        InstallabilityResult result;
+        if (entry.repository.empty())
+        {
+            // Custom-source entries are a direct .js download; nothing to resolve
+            result.installability = entry.downloadUrl.empty() ? Installability::notInstallable : Installability::installable;
+            result.version = entry.version;
+            if (entry.downloadUrl.empty())
+            {
+                result.message = "Plugin has no download location";
+            }
+            return result;
+        }
+        try
+        {
+            std::vector<std::pair<std::string, std::string>> downloads;
+            std::vector<std::pair<std::string, std::string>> zipDownloads;
+            result.version = GetGitHubDownloads(entry.repository, downloads, zipDownloads);
+            result.installability = Installability::installable;
+        }
+        catch (const NotInstallableException& e)
+        {
+            // Proven negative: there is genuinely nothing to install.
+            result.installability = Installability::notInstallable;
+            result.message = e.what();
+        }
+        catch (const std::exception& e)
+        {
+            // Network error, rate limit, etc. — we cannot prove either way, so leave it
+            // unknown rather than falsely blocking Install.
+            result.installability = Installability::unknown;
+            result.message = e.what();
+        }
+        return result;
+    }
+
     #else
 
     std::vector<Entry> FetchAvailablePlugins()
@@ -536,6 +823,11 @@ namespace OpenRCT2::Scripting::PluginStore
     InstallResult InstallPlugin(const Entry& entry)
     {
         return { false, "OpenRCT2 was built without HTTP support" };
+    }
+
+    InstallabilityResult CheckInstallability(const Entry& entry)
+    {
+        return { Installability::notInstallable, {}, "OpenRCT2 was built without HTTP support" };
     }
 
     #endif // DISABLE_HTTP

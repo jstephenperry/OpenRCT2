@@ -39,6 +39,7 @@
     #include <openrct2/ui/WindowManager.h>
     #include <set>
     #include <string>
+    #include <unordered_map>
     #include <vector>
 
 using namespace OpenRCT2::Drawing;
@@ -178,6 +179,16 @@ namespace OpenRCT2::Ui::Windows
 
         std::future<std::pair<std::vector<PluginStore::Entry>, std::string>> _fetchFuture;
         std::future<PluginStore::InstallResult> _installFuture;
+        // Lazily resolved installability of repository entries (does the latest release
+        // ship anything we can install?), keyed by entry id. Checked on selection.
+        std::unordered_map<std::string, PluginStore::InstallabilityResult> _installability;
+        std::future<std::pair<std::string, PluginStore::InstallabilityResult>> _checkFuture;
+        std::string _checkingId;
+        // Bumped on every successful fetch. A check launched under an older generation
+        // is stale once a Refresh cleared _installability, so its result is discarded
+        // rather than repopulating the freshly cleared cache.
+        uint32_t _availableGeneration = 0;
+        uint32_t _checkGeneration = 0;
         bool _hasFetched = false;
         int32_t _selectedItem = -1;
 
@@ -245,6 +256,8 @@ namespace OpenRCT2::Ui::Windows
             }
             checkFetchComplete();
             checkInstallComplete();
+            checkInstallabilityComplete();
+            maybeBeginInstallabilityCheck();
         }
 
         void onTextInput(WidgetIndex widgetIndex, std::string_view text) override
@@ -385,7 +398,8 @@ namespace OpenRCT2::Ui::Windows
                     auto* selected = selectedAvailableEntry();
                     auto installing = _installFuture.valid();
                     widgetSetDisabled(*this, WIDX_REFRESH, _fetchFuture.valid() || installing);
-                    widgetSetDisabled(*this, WIDX_INSTALL, selected == nullptr || installing);
+                    widgetSetDisabled(
+                        *this, WIDX_INSTALL, selected == nullptr || installing || selectedIsNotInstallable());
                     widgetSetDisabled(*this, WIDX_OPEN_WEBPAGE, selected == nullptr);
                     if (selected != nullptr && _installConfirmId == selected->id)
                     {
@@ -740,6 +754,10 @@ namespace OpenRCT2::Ui::Windows
             {
                 _available = std::move(entries);
                 rebuildAvailableView();
+                // Refreshing the list also invalidates cached release lookups, and any
+                // in-flight check becomes stale (see _availableGeneration).
+                _installability.clear();
+                _availableGeneration++;
                 _availableStatus = STR_PLUGIN_MANAGER_X_AVAILABLE;
             }
             else
@@ -762,6 +780,58 @@ namespace OpenRCT2::Ui::Windows
             _statusDetail = entry.name;
             _availableStatus = STR_PLUGIN_MANAGER_INSTALLING;
             _installFuture = std::async(std::launch::async, [entry] { return PluginStore::InstallPlugin(entry); });
+            invalidate();
+        }
+
+        bool selectedIsNotInstallable()
+        {
+            auto* selected = selectedAvailableEntry();
+            if (selected == nullptr)
+                return false;
+            auto it = _installability.find(selected->id);
+            return it != _installability.end()
+                && it->second.installability == PluginStore::Installability::notInstallable;
+        }
+
+        // Starts resolving whether the selected entry's latest release ships anything
+        // installable, one entry at a time, so the Install button can be greyed out
+        // before the user attempts a download that is doomed to fail.
+        void maybeBeginInstallabilityCheck()
+        {
+            if (page != PAGE_AVAILABLE || _checkFuture.valid())
+                return;
+            auto* selected = selectedAvailableEntry();
+            if (selected == nullptr || selected->repository.empty())
+                return;
+            if (_installability.find(selected->id) != _installability.end())
+                return;
+
+            auto entry = *selected;
+            _checkingId = entry.id;
+            _checkGeneration = _availableGeneration;
+            _checkFuture = std::async(std::launch::async, [entry] {
+                return std::make_pair(entry.id, PluginStore::CheckInstallability(entry));
+            });
+        }
+
+        void checkInstallabilityComplete()
+        {
+            if (!_checkFuture.valid() || _checkFuture.wait_for(std::chrono::seconds::zero()) != std::future_status::ready)
+                return;
+
+            auto [id, result] = _checkFuture.get();
+            _checkFuture = {};
+            _checkingId.clear();
+            // Drop results from a check that predates a Refresh; the list it referred to
+            // is gone and _installability was cleared for it.
+            if (_checkGeneration != _availableGeneration)
+                return;
+
+            auto notInstallable = result.installability == PluginStore::Installability::notInstallable;
+            _installability[id] = std::move(result);
+            // A greyed-out Install must not stay armed for confirmation.
+            if (notInstallable && _installConfirmId == id)
+                _installConfirmId.clear();
             invalidate();
         }
 
@@ -827,6 +897,22 @@ namespace OpenRCT2::Ui::Windows
                     {
                         drawText(rt, coords, STR_PLUGIN_MANAGER_UNVERIFIED_WARNING, { Drawing::Colour::brightRed });
                         break;
+                    }
+                    // Explain a greyed-out Install button while no install is running.
+                    if (selected != nullptr && !_installFuture.valid())
+                    {
+                        auto it = _installability.find(selected->id);
+                        if (it != _installability.end()
+                            && it->second.installability == PluginStore::Installability::notInstallable)
+                        {
+                            drawText(rt, coords, STR_PLUGIN_MANAGER_NOT_INSTALLABLE, { colours[1] });
+                            break;
+                        }
+                        if (_checkingId == selected->id)
+                        {
+                            drawText(rt, coords, STR_PLUGIN_MANAGER_CHECKING_RELEASE, { colours[1] });
+                            break;
+                        }
                     }
                     if (_availableStatus == STR_PLUGIN_MANAGER_X_AVAILABLE)
                     {
