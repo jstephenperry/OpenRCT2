@@ -138,14 +138,16 @@ namespace OpenRCT2::Http
             curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
             curl_easy_setopt(curl, CURLOPT_USERAGENT, kOpenRCT2UserAgent);
 
-            // Restrict to HTTP(S) for both the initial request and any redirect target,
-            // so an attacker-controlled URL cannot smuggle file://, gopher://, etc.
+            // Restrict the initial request to HTTP(S) so an attacker-controlled URL
+            // cannot smuggle file://, gopher://, etc. Redirects are held to HTTPS only:
+            // callers that require encrypted transport (e.g. plugin downloads) validate
+            // the initial scheme, and a redirect must not be able to downgrade to http.
     #if LIBCURL_VERSION_NUM >= 0x075500 // 7.85.0 introduced the string form
             curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
-            curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+            curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
     #else
             curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
-            curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+            curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTPS);
     #endif
             curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
 

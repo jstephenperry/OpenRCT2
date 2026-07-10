@@ -15,8 +15,12 @@
     #include "../core/Console.hpp"
     #include "String.hpp"
 
+    #include <algorithm>
+    #include <climits>
+    #include <cstdint>
     #include <cstdio>
     #include <stdexcept>
+    #include <string_view>
 
     #ifndef WIN32_LEAN_AND_MEAN
         #define WIN32_LEAN_AND_MEAN
@@ -123,7 +127,9 @@ namespace OpenRCT2::Http
         return headers;
     }
 
-    static std::string ReadBody(HINTERNET hRequest)
+    // maxSize bounds the response body; 0 = unlimited. A transfer that exceeds it is
+    // aborted before more memory is committed, matching the cURL backend's behaviour.
+    static std::string ReadBody(HINTERNET hRequest, size_t maxSize)
     {
         std::string body;
         DWORD dwRealSize{};
@@ -139,6 +145,9 @@ namespace OpenRCT2::Http
             // download incorrectly, so still attempt to read...
             if (dwSizeToRead == 0)
                 dwSizeToRead = 4096;
+
+            if (maxSize != 0 && dwRealSize + dwSizeToRead > maxSize)
+                throw std::runtime_error("Response body exceeded the maximum allowed size");
 
             body.resize(dwRealSize + dwSizeToRead);
             auto dst = reinterpret_cast<LPVOID>(&body[dwRealSize]);
@@ -176,6 +185,15 @@ namespace OpenRCT2::Http
             if (hSession == nullptr)
                 ThrowWin32Exception("WinHttpOpen");
 
+            if (req.timeoutSeconds != 0)
+            {
+                // WinHttpSetTimeouts takes milliseconds; 0 would mean "no timeout", so
+                // clamp to at least 1ms. Resolve/connect are capped at 30s like cURL.
+                auto ms = static_cast<int>(std::min<int64_t>(req.timeoutSeconds * 1000LL, INT_MAX));
+                auto connectMs = static_cast<int>(std::min(req.timeoutSeconds, 30) * 1000);
+                WinHttpSetTimeouts(hSession, connectMs, connectMs, ms, ms);
+            }
+
             auto wHostName = std::wstring(url.lpszHostName, url.dwHostNameLength);
             hConnect = WinHttpConnect(hSession, wHostName.c_str(), url.nPort, 0);
             if (hConnect == nullptr)
@@ -188,7 +206,17 @@ namespace OpenRCT2::Http
             }
 
             auto wVerb = GetVerb(req.method);
+            // lpszUrlPath excludes the query string, which WinHttpCrackUrl places in
+            // lpszExtraInfo — append it so requests like /search?q=... stay intact.
+            // lpszExtraInfo also carries any '#fragment', which is client-side only and
+            // must not be sent to the server, so stop at the first '#'.
             auto wQuery = std::wstring(url.lpszUrlPath, url.dwUrlPathLength);
+            if (url.dwExtraInfoLength != 0)
+            {
+                std::wstring_view extra(url.lpszExtraInfo, url.dwExtraInfoLength);
+                extra = extra.substr(0, extra.find(L'#'));
+                wQuery.append(extra);
+            }
             hRequest = WinHttpOpenRequest(
                 hConnect, wVerb, wQuery.c_str(), NULL, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, dwFlags);
             if (hRequest == nullptr)
@@ -211,7 +239,7 @@ namespace OpenRCT2::Http
 
             auto statusCode = ReadStatusCode(hRequest);
             auto headers = ReadHeaders(hRequest);
-            auto body = ReadBody(hRequest);
+            auto body = ReadBody(hRequest, req.maxSize);
 
             Response response;
             response.body = std::move(body);
