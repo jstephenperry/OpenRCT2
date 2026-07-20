@@ -1547,7 +1547,9 @@ namespace OpenRCT2::Ui::Windows
         {
             if (widgetIndex != WIDX_SPECIAL_TRACK_DROPDOWN)
                 return;
-            if (selectedIndex == -1)
+            // The dropdown stays open while the game keeps ticking, so the elements list may have been rebuilt (and
+            // possibly emptied) since it was shown. Guard against an out-of-bounds selection to avoid a crash.
+            if (selectedIndex < 0 || static_cast<size_t>(selectedIndex) >= _specialElementDropdownState.Elements.size())
                 return;
 
             RideConstructionInvalidateCurrentTrack();

@@ -5,6 +5,8 @@
 - Fix: [#1514] Wrong capitalisation in the guest list when filtering by guests on, queuing for, or heading for a ride (original bug).
 - Fix: [#26494] The limits for where walls on the path side of the first tile block the view of rides/scenery are wrong (original bug).
 - Fix: [#26504] The boosts/penalties to excitement and nausea that air time provides are calculated wrong.
+- Fix: [#26732] Crash in the ride construction window when selecting a special track piece after the dropdown list has been emptied.
+- Fix: [#26734] Crash when renaming a banner whose tile element is a wall or large scenery sign.
 
 0.5.2 (2026-06-07)
 ------------------------------------------------------------------------

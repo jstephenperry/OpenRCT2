@@ -64,6 +64,12 @@ namespace OpenRCT2::GameActions
         }
 
         BannerElement* bannerElement = tileElement->asBanner();
+        if (bannerElement == nullptr)
+        {
+            LOG_ERROR("Banner tile element not found for bannerIndex %d", _bannerIndex);
+            return Result(Status::invalidParameters, STR_CANT_RENAME_BANNER, STR_ERR_BANNER_ELEMENT_NOT_FOUND);
+        }
+
         CoordsXYZD loc = { banner->position.ToCoordsXY(), bannerElement->getBaseZ(), bannerElement->GetPosition() };
 
         if (!LocationValid(loc))
